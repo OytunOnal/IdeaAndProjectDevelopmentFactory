@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.venv/
+venv/
+dist/
+build/
+.eggs/
+
+# Node
+node_modules/
+.next/
+out/
+.vercel
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# MCP config (contains access tokens)
+.mcp.json
+
+# Local persistence (SQLite checkpoints + project index)
+backend/data/
+
+# Local-only: predecessor prompt-based system (Turkish) and session notes
+legacy/
+PROGRESS.md
+
+# IDE
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Misc
+*.log
+coverage/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Editor config with legacy-system notes
+.vscode/
