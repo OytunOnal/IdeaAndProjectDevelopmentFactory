@@ -1,5 +1,7 @@
 "use client";
 
+import { Markdown } from "@/components/markdown";
+
 interface DocumentViewerProps {
   filePath?: string;
   content?: string;
@@ -19,8 +21,8 @@ export function DocumentViewer({ filePath, content }: DocumentViewerProps) {
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <span>{filePath}</span>
       </div>
-      <div className="prose prose-invert max-w-none whitespace-pre-wrap text-sm">
-        {content || "File content will appear here..."}
+      <div className="mx-auto max-w-3xl text-sm">
+        <Markdown>{content || "File content will appear here..."}</Markdown>
       </div>
     </div>
   );

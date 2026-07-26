@@ -7,6 +7,11 @@ Research agents and later phases are registered as nodes but not wired yet.
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.collaboration import (
+    doc_gate_node,
+    revise_document_node,
+    spec_improver_node,
+)
 from app.agents.decision_handler import decision_handler_node
 from app.agents.idea_analyst import idea_analyst_node
 from app.agents.orchestrator import orchestrator_node, route_orchestrator
@@ -80,6 +85,10 @@ graph_builder.add_node("quality_review", quality_review_node)
 # Packaging agents (live)
 graph_builder.add_node("planning_agent", planning_agent_node)
 graph_builder.add_node("doc_formatter", doc_formatter_node)
+# Collaboration nodes (per-doc gates, revisions, quality improvement)
+graph_builder.add_node("doc_gate", doc_gate_node)
+graph_builder.add_node("revise_document", revise_document_node)
+graph_builder.add_node("spec_improver", spec_improver_node)
 # Roadmap agents (stubs)
 graph_builder.add_node("brand_strategist", brand_strategist_node)
 graph_builder.add_node("legal_advisor", legal_advisor_node)
@@ -117,6 +126,9 @@ graph_builder.add_conditional_edges(
         "quality_review": "quality_review",
         "planning_agent": "planning_agent",
         "doc_formatter": "doc_formatter",
+        "doc_gate": "doc_gate",
+        "revise_document": "revise_document",
+        "spec_improver": "spec_improver",
         "__end__": END,
     },
 )
@@ -143,6 +155,9 @@ for node in (
     "quality_review",
     "planning_agent",
     "doc_formatter",
+    "doc_gate",
+    "revise_document",
+    "spec_improver",
 ):
     graph_builder.add_edge(node, "orchestrator")
 

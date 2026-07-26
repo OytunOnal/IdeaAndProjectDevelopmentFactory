@@ -128,3 +128,50 @@
     @apply font-sans;
   }
 }
+/* ── Markdown body (documents + agent messages) ─────────────────── */
+.md-body {
+  line-height: 1.65;
+}
+.md-body h1 { font-size: 1.35rem; font-weight: 700; margin: 1.2em 0 0.5em; }
+.md-body h2 { font-size: 1.15rem; font-weight: 700; margin: 1.1em 0 0.4em; }
+.md-body h3 { font-size: 1rem; font-weight: 600; margin: 1em 0 0.3em; }
+.md-body p { margin: 0.5em 0; }
+.md-body ul, .md-body ol { margin: 0.5em 0; padding-left: 1.4em; }
+.md-body ul { list-style: disc; }
+.md-body ol { list-style: decimal; }
+.md-body li { margin: 0.2em 0; }
+.md-body strong { font-weight: 650; }
+.md-body a { text-decoration: underline; text-underline-offset: 2px; }
+.md-body blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.9em;
+  margin: 0.6em 0;
+  color: var(--muted-foreground);
+}
+.md-body code {
+  background: var(--muted);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.md-body pre {
+  background: var(--muted);
+  padding: 0.8em 1em;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.md-body pre code { background: transparent; padding: 0; }
+.md-body table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  width: 100%;
+  font-size: 0.9em;
+}
+.md-body th, .md-body td {
+  border: 1px solid var(--border);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.md-body th { background: var(--muted); font-weight: 600; }
+.md-body hr { border: 0; border-top: 1px solid var(--border); margin: 1.2em 0; }

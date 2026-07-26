@@ -8,11 +8,18 @@ multi-provider LLM chain.
 import logging
 
 from app.agents.common import (
+    ACTION_CAPABILITY,
+    CONSTRUCTIVE_PRINCIPLE,
+    DOC_PATHS,
     agent_message,
+    apply_discussion_action,
     brief_context,
+    current_gate_card,
     docs_context,
     emit_progress,
+    extract_adjustments,
     get_doc,
+    parse_action,
 )
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
@@ -86,7 +93,7 @@ Be realistic, not optimistic. Use benchmarks from the research where available. 
 
 SPEC_AGENTS = {
     "spec_writer": {
-        "prompt": SPEC_WRITER_PROMPT,
+        "prompt": SPEC_WRITER_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "prd",
         "context": ["market_research", "competitor_analysis", "tech_feasibility"],
         "title": "Product Requirements Document",
@@ -94,7 +101,7 @@ SPEC_AGENTS = {
         "tier": 1,
     },
     "architecture_designer": {
-        "prompt": ARCHITECTURE_PROMPT,
+        "prompt": ARCHITECTURE_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "architecture",
         "context": ["prd", "tech_feasibility"],
         "title": "System Architecture",
@@ -102,7 +109,7 @@ SPEC_AGENTS = {
         "tier": 1,
     },
     "ux_strategist": {
-        "prompt": UX_PROMPT,
+        "prompt": UX_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "ux_design",
         "context": ["prd", "competitor_analysis"],
         "title": "UX Specification",
@@ -110,7 +117,7 @@ SPEC_AGENTS = {
         "tier": 2,
     },
     "gtm_strategist": {
-        "prompt": GTM_PROMPT,
+        "prompt": GTM_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "gtm_strategy",
         "context": ["prd", "market_research", "competitor_analysis"],
         "title": "Go-to-Market Strategy",
@@ -118,7 +125,7 @@ SPEC_AGENTS = {
         "tier": 2,
     },
     "financial_modeler": {
-        "prompt": FINANCIAL_PROMPT,
+        "prompt": FINANCIAL_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "financial_model",
         "context": ["prd", "market_research", "gtm_strategy"],
         "title": "Financial Model",
@@ -165,13 +172,19 @@ async def _run_spec_agent(state: ProjectState, agent_id: str) -> ProjectState:
             "current_agent": agent_id,
         }
 
+    path = DOC_PATHS.get(spec["output_key"], "")
+    chat_note = (
+        f"{spec['emoji']} **{spec['title']} complete** — opened in the files "
+        f"panel (`{path}`)."
+    )
+    adjustments = extract_adjustments(document)
+    if adjustments:
+        chat_note += f"\n\n**Recommended adjustments:**\n{adjustments}"
+
     return {
         **state,
         spec["output_key"]: document,
-        "messages": agent_message(
-            state, agent_id,
-            f"{spec['emoji']} **{spec['title']} complete**\n\n{document}",
-        ),
+        "messages": agent_message(state, agent_id, chat_note),
         "current_agent": agent_id,
         "pipeline_status": "running",
         "total_llm_calls": state.get("total_llm_calls", 0) + 1,
@@ -279,8 +292,11 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
     grounding = docs_context(state, doc_keys, max_chars=1500)
     system = (
         "You are the Orchestrator of ProjectFactory. Answer the user's questions "
-        "concisely, grounded ONLY in the project documents below. If they request "
-        "changes, explain what you can and cannot adjust at this stage.\n\n" + grounding
+        "concisely, grounded in the project documents below. Be constructive: "
+        "when the user raises a concern, propose how the project could adapt "
+        "rather than defending the documents."
+        + ACTION_CAPABILITY
+        + "\n\n" + grounding
     )
 
     llm_messages = [{"role": "system", "content": system}]
@@ -303,16 +319,29 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
         logger.error(f"Review discussion failed: {e}")
         answer = f"I couldn't reach the AI model: {e}"
 
+    # The agent may respond with an action instead of an answer
+    action = parse_action(answer)
+    if action:
+        applied = apply_discussion_action(state, action)
+        if applied:
+            return applied
+        answer = (
+            "I couldn't map that request to a document action — tell me which "
+            "document should change and what the change is."
+        )
+
+    # Re-present whichever approval card is currently relevant
     phase = state.get("current_phase")
-    pending = None
-    if phase == "specification":
-        pending = _approval_card(
-            "Ready to proceed to the quality review phase?", "approve-spec"
-        )
-    elif phase == "quality":
-        pending = _approval_card(
-            "Ready to proceed to the packaging phase?", "approve-quality"
-        )
+    pending = current_gate_card(state)
+    if pending is None:
+        if phase == "specification" and state.get("spec_review_done"):
+            pending = _approval_card(
+                "Ready to proceed to the quality review phase?", "approve-spec"
+            )
+        elif phase == "quality" and state.get("quality_review_done"):
+            pending = _approval_card(
+                "Ready to proceed to the packaging phase?", "approve-quality"
+            )
 
     return {
         **state,

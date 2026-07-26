@@ -9,6 +9,7 @@ from fastapi.responses import Response
 
 from app.agents import graph
 from app.agents.decision_handler import resolve_decision
+from app.agents.packaging import draft_files
 from app.models.decision import DecisionSubmit
 from app.models.project import ProjectCreate, ProjectResponse
 from app.services.project_store import project_store
@@ -87,6 +88,9 @@ async def start_pipeline(project_id: str, body: dict | None = None):
         ],
         "decisions": [],
         "pending_decision": None,
+        "approved_docs": [],
+        "revision_target": None,
+        "revision_feedback": None,
         "total_llm_calls": 0,
         "total_tokens_used": 0,
         "estimated_cost": 0,
@@ -129,7 +133,7 @@ def _pipeline_response(result: dict) -> dict:
             "approved": result.get("research_approved", False),
         },
         "quality_score": result.get("quality_score"),
-        "files": sorted((result.get("project_files") or {}).keys()),
+        "files": sorted(draft_files(result).keys()),
     }
 
 
@@ -244,14 +248,14 @@ async def _get_state_values(project_id: str) -> dict:
 @router.get("/projects/{project_id}/files")
 async def list_files(project_id: str):
     state = await _get_state_values(project_id)
-    files = state.get("project_files") or {}
+    files = draft_files(state)
     return {"files": [{"path": p, "size": len(files[p])} for p in sorted(files)]}
 
 
 @router.get("/projects/{project_id}/files/{file_path:path}")
 async def get_file(project_id: str, file_path: str):
     state = await _get_state_values(project_id)
-    files = state.get("project_files") or {}
+    files = draft_files(state)
     if file_path not in files:
         return {"error": "File not found", "file_path": file_path}
     return {"file_path": file_path, "content": files[file_path]}

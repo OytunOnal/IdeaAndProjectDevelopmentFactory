@@ -148,6 +148,109 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
             "pipeline_status": "running",
         }
 
+    # Per-document approval cards ("approve-doc:<key>")
+    pending_id = pending.get("id", "")
+    if pending_id.startswith("approve-doc:"):
+        doc_key = pending_id.split(":", 1)[1]
+
+        if chosen == "confirm":
+            approved = list(state.get("approved_docs") or [])
+            if doc_key not in approved:
+                approved.append(doc_key)
+            messages.append({
+                "id": f"msg-user-{len(messages)}",
+                "role": "user",
+                "content": "Approved — continue.",
+                "timestamp": "",
+            })
+            return {
+                **state,
+                "approved_docs": approved,
+                "decisions": decisions,
+                "messages": messages,
+                "pending_decision": None,
+                "pipeline_status": "running",
+            }
+
+        if chosen == "apply":
+            # Integrate all numbered recommendations into the document
+            messages.append({
+                "id": f"msg-user-{len(messages)}",
+                "role": "user",
+                "content": "Apply the recommended adjustments.",
+                "timestamp": "",
+            })
+            return {
+                **state,
+                "revision_target": doc_key,
+                "revision_feedback": (
+                    "Apply ALL the numbered items from your previous version's "
+                    "'Recommended Adjustments' section: integrate them fully into "
+                    "the project direction and rewrite the document accordingly."
+                ),
+                "decisions": decisions,
+                "messages": messages,
+                "pending_decision": None,
+                "pipeline_status": "running",
+            }
+
+        if submission.get("custom_input"):
+            # Freeform text on the card = the change request itself
+            # (e.g. "apply 1 and 3", or any other change description)
+            messages.append({
+                "id": f"msg-user-{len(messages)}",
+                "role": "user",
+                "content": submission["custom_input"],
+                "timestamp": "",
+            })
+            return {
+                **state,
+                "revision_target": doc_key,
+                "revision_feedback": submission["custom_input"],
+                "decisions": decisions,
+                "messages": messages,
+                "pending_decision": None,
+                "pipeline_status": "running",
+            }
+
+        # "Request changes" clicked without text → ask what to change
+        messages.append({
+            "id": f"msg-agent-{len(messages)}",
+            "role": "agent",
+            "agent_id": "orchestrator",
+            "content": "What should be different? Describe the changes and the agent will rewrite the document.",
+            "timestamp": "",
+        })
+        return {
+            **state,
+            "revision_target": doc_key,
+            "decisions": decisions,
+            "messages": messages,
+            "pending_decision": None,
+            "pipeline_status": "waiting_for_user",
+        }
+
+    # Quality gate: "improve" (or freeform guidance) runs a revision pass
+    if pending_id == "approve-quality" and (
+        chosen == "improve" or (action == "custom" and submission.get("custom_input"))
+    ):
+        focus = submission.get("custom_input") if action == "custom" else None
+        messages.append({
+            "id": f"msg-user-{len(messages)}",
+            "role": "user",
+            "content": focus or "Improve the specs using the quality review.",
+            "timestamp": "",
+        })
+        return {
+            **state,
+            "quality_improve_requested": True,
+            "quality_improve_focus": focus,
+            "decisions": decisions,
+            "messages": messages,
+            "pending_decision": None,
+            "pipeline_status": "running",
+        }
+
     # Phase-gate approvals share the same mechanics
     if pending.get("id") in PHASE_GATES:
         gate = PHASE_GATES[pending["id"]]

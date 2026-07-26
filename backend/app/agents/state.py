@@ -55,6 +55,16 @@ class ProjectState(TypedDict, total=False):
     decisions: list
     pending_decision: dict | None
 
+    # Per-document approval + revision workflow
+    approved_docs: list
+    revision_target: str | None
+    revision_feedback: str | None
+    quality_improve_requested: bool
+    quality_improve_focus: str | None
+    quality_improve_targets: list
+    quality_top_fixes: list
+    quality_score_history: list
+
     # Chat messages
     messages: list
 

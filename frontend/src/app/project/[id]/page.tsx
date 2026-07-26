@@ -88,6 +88,26 @@ function WorkspaceContent() {
     }
   }, [projectId]);
 
+  // Auto-open documents as agents produce them; when the pipeline pauses,
+  // refresh the open document (revisions keep the path, change the content).
+  const knownFilesRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const known = knownFilesRef.current;
+    const fresh = state.files.filter((f) => !known.has(f));
+    state.files.forEach((f) => known.add(f));
+    if (fresh.length > 0) {
+      handleSelectFile(fresh[fresh.length - 1]);
+    } else if (
+      selectedFile &&
+      state.pipeline_status === "waiting_for_user" &&
+      state.files.includes(selectedFile)
+    ) {
+      handleSelectFile(selectedFile);
+    }
+    // Refetch only on file-list growth or pipeline pauses — not on selection
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.files, state.pipeline_status, handleSelectFile]);
+
   // On mount: restore existing pipeline state, or auto-start the pipeline
   // with the idea the user entered on the New Project page.
   const initRef = useRef(false);

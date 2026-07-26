@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DecisionCard } from "./decision-card";
+import { Markdown } from "@/components/markdown";
 import { AGENT_DISPLAY_NAMES, AGENT_COLORS } from "@/types/agent";
 import type { AgentId } from "@/types/agent";
 import { API_URL } from "@/lib/constants";
@@ -171,7 +172,11 @@ export function ChatPanel({
               {!isAgent && (
                 <p className="mb-1 text-xs font-medium text-muted-foreground">You</p>
               )}
-              <div className="whitespace-pre-wrap">{msg.content}</div>
+              {isAgent ? (
+                <Markdown>{msg.content}</Markdown>
+              ) : (
+                <div className="whitespace-pre-wrap">{msg.content}</div>
+              )}
             </div>
           );
         })}

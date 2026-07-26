@@ -10,7 +10,18 @@ generic multi-provider LLM (knowledge-only, clearly flagged in the report).
 
 import logging
 
-from app.agents.common import brief_context, emit_progress
+from app.agents.common import (
+    ACTION_CAPABILITY,
+    CONSTRUCTIVE_PRINCIPLE,
+    DOC_PATHS,
+    agent_message,
+    apply_discussion_action,
+    brief_context,
+    current_gate_card,
+    emit_progress,
+    extract_adjustments,
+    parse_action,
+)
 from app.agents.llm import call_anthropic_web_search, call_llm
 from app.agents.state import ProjectState
 from app.config import settings
@@ -64,19 +75,19 @@ Use web search for current pricing and ecosystem maturity where it matters. Keep
 
 _AGENTS = {
     "market_researcher": {
-        "prompt": MARKET_RESEARCHER_PROMPT,
+        "prompt": MARKET_RESEARCHER_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "market_research",
         "title": "Market Research",
         "emoji": "📊",
     },
     "competitor_analyst": {
-        "prompt": COMPETITOR_ANALYST_PROMPT,
+        "prompt": COMPETITOR_ANALYST_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "competitor_analysis",
         "title": "Competitor Analysis",
         "emoji": "🥊",
     },
     "tech_feasibility": {
-        "prompt": TECH_FEASIBILITY_PROMPT,
+        "prompt": TECH_FEASIBILITY_PROMPT + CONSTRUCTIVE_PRINCIPLE,
         "output_key": "tech_feasibility",
         "title": "Tech Feasibility",
         "emoji": "🛠️",
@@ -163,19 +174,20 @@ async def _run_research_agent(state: ProjectState, agent_id: str) -> ProjectStat
         "completed": True,
     }
 
-    messages = list(state.get("messages", []))
-    messages.append({
-        "id": f"msg-agent-{len(messages)}",
-        "role": "agent",
-        "agent_id": agent_id,
-        "content": f"{spec['emoji']} **{spec['title']} complete**\n\n{report}",
-        "timestamp": "",
-    })
+    source_note = f" ({len(sources)} cited sources)" if sources else ""
+    path = DOC_PATHS.get(spec["output_key"], "")
+    chat_note = (
+        f"{spec['emoji']} **{spec['title']} complete**{source_note} — "
+        f"opened in the files panel (`{path}`)."
+    )
+    adjustments = extract_adjustments(report)
+    if adjustments:
+        chat_note += f"\n\n**Recommended adjustments:**\n{adjustments}"
 
     return {
         **state,
         spec["output_key"]: result,
-        "messages": messages,
+        "messages": agent_message(state, agent_id, chat_note),
         "current_agent": agent_id,
         "pipeline_status": "running",
         "total_llm_calls": state.get("total_llm_calls", 0) + 1,
@@ -203,9 +215,11 @@ async def research_discussion_node(state: ProjectState) -> ProjectState:
     system = (
         "You are the Orchestrator of ProjectFactory. The user has questions about "
         "the completed research before approving it. Answer them concisely and "
-        "concretely, grounded ONLY in the reports below. If they ask for research "
-        "beyond what the reports cover, say what you can infer and note its limits.\n\n"
-        + reports
+        "concretely, grounded in the reports below. Be constructive: if the user "
+        "is worried about a finding, suggest how the project could adapt (smaller "
+        "scope, different segment, different positioning)."
+        + ACTION_CAPABILITY
+        + "\n\n" + reports
     )
 
     llm_messages = [{"role": "system", "content": system}]
@@ -228,22 +242,21 @@ async def research_discussion_node(state: ProjectState) -> ProjectState:
         logger.error(f"Research discussion failed: {e}")
         answer = f"I couldn't reach the AI model: {e}"
 
-    messages = list(state.get("messages", []))
-    messages.append({
-        "id": f"msg-agent-{len(messages)}",
-        "role": "agent",
-        "agent_id": "orchestrator",
-        "content": answer,
-        "timestamp": "",
-    })
+    # The agent may respond with an action instead of an answer
+    action = parse_action(answer)
+    if action:
+        applied = apply_discussion_action(state, action)
+        if applied:
+            return applied
+        answer = (
+            "I couldn't map that request to a document action — tell me which "
+            "document should change and what the change is."
+        )
 
-    return {
-        **state,
-        "messages": messages,
-        "current_agent": "orchestrator",
-        "pipeline_status": "waiting_for_user",
-        # Re-present the approval card after answering
-        "pending_decision": {
+    # Re-present whichever approval card is currently relevant
+    pending = current_gate_card(state)
+    if pending is None and state.get("research_review_done") and not state.get("research_approved"):
+        pending = {
             "id": "approve-research",
             "agent": "orchestrator",
             "category": "strategic",
@@ -264,7 +277,14 @@ async def research_discussion_node(state: ProjectState) -> ProjectState:
             "agent_reasoning": "All three research dimensions are covered.",
             "allow_delegate": True,
             "allow_freeform": True,
-        },
+        }
+
+    return {
+        **state,
+        "messages": agent_message(state, "orchestrator", answer),
+        "current_agent": "orchestrator",
+        "pipeline_status": "waiting_for_user",
+        "pending_decision": pending,
     }
 
 

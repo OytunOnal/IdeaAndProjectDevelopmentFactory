@@ -87,22 +87,44 @@ FILE_MAP = {
 }
 
 
+def _render_doc(state: ProjectState, key: str) -> str | None:
+    """Render one document (with sources footer for research docs)."""
+    doc = get_doc(state, key)
+    if not doc:
+        return None
+    content = f"# {DOC_TITLES.get(key, key)}\n\n{doc}\n"
+    value = state.get(key)
+    if isinstance(value, dict) and value.get("sources"):
+        sources = "\n".join(f"- {u}" for u in value["sources"])
+        content += f"\n---\n\n## Sources\n\n{sources}\n"
+    return content
+
+
+def draft_files(state: ProjectState) -> dict[str, str]:
+    """The current document set: final files after packaging, live drafts before.
+
+    This is what the file tree shows — documents appear as soon as an agent
+    produces them, not only at the end.
+    """
+    if state.get("project_files"):
+        return state["project_files"]
+    files: dict[str, str] = {}
+    for path, key in FILE_MAP.items():
+        content = _render_doc(state, key)
+        if content:
+            files[path] = content
+    return files
+
+
 async def doc_formatter_node(state: ProjectState) -> ProjectState:
     """Assemble all produced documents into the final file set (no LLM needed)."""
     await emit_progress(state, "doc_formatter", "📦 Assembling the final document set...")
 
     files: dict[str, str] = {}
     for path, key in FILE_MAP.items():
-        doc = get_doc(state, key)
-        if not doc:
-            continue
-        content = f"# {DOC_TITLES.get(key, key)}\n\n{doc}\n"
-        # Research documents carry their cited sources
-        value = state.get(key)
-        if isinstance(value, dict) and value.get("sources"):
-            sources = "\n".join(f"- {u}" for u in value["sources"])
-            content += f"\n---\n\n## Sources\n\n{sources}\n"
-        files[path] = content
+        content = _render_doc(state, key)
+        if content:
+            files[path] = content
 
     files["INDEX.md"] = _build_index(state, files)
 

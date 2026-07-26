@@ -73,5 +73,15 @@ async def emit_pipeline_update(project_id: str, state: dict):
         "pending_decision": state.get("pending_decision"),
         "idea_brief": state.get("idea_brief"),
         "quality_score": state.get("quality_score"),
-        "files": sorted((state.get("project_files") or {}).keys()),
+        "files": _file_list(state),
     })
+
+
+def _file_list(state: dict) -> list[str]:
+    # Function-level import: packaging → common → this module (avoid the cycle)
+    from app.agents.packaging import draft_files
+
+    try:
+        return sorted(draft_files(state).keys())
+    except Exception:
+        return []

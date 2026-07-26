@@ -18,6 +18,14 @@ def route_orchestrator(state: ProjectState) -> str:
 
     phase = state.get("current_phase", "idle")
 
+    # A document revision is in flight (user clicked "Request changes"):
+    # run the rewrite once we have their feedback, else wait for it.
+    if state.get("revision_target"):
+        messages = state.get("messages", [])
+        if state.get("revision_feedback") or (messages and messages[-1].get("role") == "user"):
+            return "revise_document"
+        return "__end__"
+
     # IDLE: new project, start discovery
     if phase == "idle":
         return "idea_analyst"
@@ -30,14 +38,18 @@ def route_orchestrator(state: ProjectState) -> str:
         if not idea_brief or not idea_brief.get("confirmed"):
             return "idea_analyst"
 
-        # Brief confirmed → run research agents sequentially, then review
+        # Brief confirmed → each research doc is produced, then user-approved
         if not state.get("research_approved"):
-            if not state.get("market_research", {}).get("completed"):
-                return "market_researcher"
-            if not state.get("competitor_analysis", {}).get("completed"):
-                return "competitor_analyst"
-            if not state.get("tech_feasibility", {}).get("completed"):
-                return "tech_feasibility"
+            approved = state.get("approved_docs") or []
+            for key, node in (
+                ("market_research", "market_researcher"),
+                ("competitor_analysis", "competitor_analyst"),
+                ("tech_feasibility", "tech_feasibility"),
+            ):
+                if not state.get(key, {}).get("completed"):
+                    return node
+                if key not in approved:
+                    return _gate_or_discussion(state, "research_discussion")
             if not state.get("research_review_done"):
                 return "research_review"
             # Review done but not approved → answer follow-up questions
@@ -46,8 +58,9 @@ def route_orchestrator(state: ProjectState) -> str:
                 return "research_discussion"
             return "__end__"
 
-    # SPECIFICATION phase: write the five spec documents, then review
+    # SPECIFICATION phase: each spec doc is written, then user-approved
     if phase == "specification":
+        approved = state.get("approved_docs") or []
         for key, node in (
             ("prd", "spec_writer"),
             ("architecture", "architecture_designer"),
@@ -57,12 +70,16 @@ def route_orchestrator(state: ProjectState) -> str:
         ):
             if not state.get(key):
                 return node
+            if key not in approved:
+                return _gate_or_discussion(state, "review_discussion")
         if not state.get("spec_review_done"):
             return "spec_review"
         return _discussion_or_end(state)
 
     # QUALITY phase: score, stress-test, cross-check, then review
     if phase == "quality":
+        if state.get("quality_improve_requested"):
+            return "spec_improver"
         if not state.get("quality_feedback"):
             return "quality_reviewer"
         if not state.get("devils_advocate"):
@@ -94,6 +111,15 @@ def _discussion_or_end(state: ProjectState) -> str:
     if messages and messages[-1].get("role") == "user":
         return "review_discussion"
     return "__end__"
+
+
+def _gate_or_discussion(state: ProjectState, discussion_node: str) -> str:
+    """A document awaits approval: answer a fresh user question about it,
+    otherwise (re-)present its approval card."""
+    messages = state.get("messages", [])
+    if messages and messages[-1].get("role") == "user":
+        return discussion_node
+    return "doc_gate"
 
 
 async def orchestrator_node(state: ProjectState) -> ProjectState:

@@ -3,7 +3,12 @@
 import json
 import logging
 
-from app.agents.common import agent_message, docs_context, emit_progress
+from app.agents.common import (
+    DOC_PATHS,
+    agent_message,
+    docs_context,
+    emit_progress,
+)
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
 
@@ -35,8 +40,10 @@ Output in markdown:
 End your response with exactly this fenced JSON block:
 
 ```json
-{"total": <int>, "breakdown": {"strategy": <int>, "product": <int>, "design_gtm": <int>, "technical": <int>}, "grade": "<A|B|C|D|F>", "verdict": "<PASS|FAIL>"}
+{"total": <int>, "breakdown": {"strategy": <int>, "product": <int>, "design_gtm": <int>, "technical": <int>}, "grade": "<A|B|C|D|F>", "verdict": "<PASS|FAIL>", "top_fixes": ["<doc_key>: <fix>", ...]}
 ```
+
+top_fixes: the 3-5 highest-impact concrete fixes ordered by impact. Each MUST start with the target document key and a colon — one of prd, architecture, ux_design, gtm_strategy, financial_model. Example: "prd: Add acceptance criteria to the five MVP user stories".
 
 Grades: A 90+, B 80-89, C 70-79, D 60-69, F below 60. PASS requires >= 80. Be critical and honest — an inflated score helps no one."""
 
@@ -50,6 +57,8 @@ Challenge, in markdown:
 3. **Technical Risks** — hardest challenge, single points of failure.
 4. **Business Model Risks** — will users actually pay? What evidence exists?
 5. **Unvalidated Assumptions** — list every untested assumption, ranked by impact.
+
+Every risk you raise MUST come with at least one concrete mitigation or pivot — never leave the user with "this won't work" and no path forward.
 
 End with: recommended actions for the top 3 risks, and an overall risk rating line `RISK: LOW | MEDIUM | HIGH | CRITICAL`. Max ~700 words, specific counter-arguments only — no generic caution."""
 
@@ -68,7 +77,7 @@ Output: a table of inconsistencies (location, severity critical/major/minor, sug
 
 async def quality_reviewer_node(state: ProjectState) -> ProjectState:
     await emit_progress(state, "quality_reviewer", "🔍 Scoring the specifications against the quality rubric...")
-    docs = docs_context(state, ALL_SPEC_DOCS, max_chars=3000)
+    docs = docs_context(state, ALL_SPEC_DOCS, max_chars=6000)
 
     try:
         response = await call_llm(
@@ -93,17 +102,24 @@ async def quality_reviewer_node(state: ProjectState) -> ProjectState:
             "current_agent": "quality_reviewer",
         }
 
-    score, breakdown = _extract_score(response)
+    score, breakdown, top_fixes = _extract_score(response)
     feedback = _strip_json_block(response)
+    history = list(state.get("quality_score_history") or [])
+    if score is not None:
+        history.append(score)
 
     return {
         **state,
         "quality_score": score,
         "quality_breakdown": breakdown or {},
+        "quality_top_fixes": top_fixes,
+        "quality_score_history": history,
         "quality_feedback": feedback,
         "messages": agent_message(
             state, "quality_reviewer",
-            f"🔍 **Quality Review complete** — score: **{score if score is not None else 'n/a'}/100**\n\n{feedback}",
+            f"🔍 **Quality Review complete** — score: "
+            f"**{score if score is not None else 'n/a'}/100**. Full review with "
+            f"per-gap fixes in `{DOC_PATHS['quality_feedback']}`.",
         ),
         "current_agent": "quality_reviewer",
         "pipeline_status": "running",
@@ -157,7 +173,11 @@ async def _run_report_agent(
     return {
         **state,
         output_key: report,
-        "messages": agent_message(state, agent_id, f"{emoji} **{title}**\n\n{report}"),
+        "messages": agent_message(
+            state, agent_id,
+            f"{emoji} **{title} ready** — see `{DOC_PATHS.get(output_key, '')}` "
+            "in the files panel.",
+        ),
         "current_agent": agent_id,
         "pipeline_status": "running",
         "total_llm_calls": state.get("total_llm_calls", 0) + 1,
@@ -165,18 +185,50 @@ async def _run_report_agent(
 
 
 async def quality_review_node(state: ProjectState) -> ProjectState:
-    """Present the quality verdict and ask to proceed to packaging."""
+    """Present the quality verdict. Below 80, recommend improving, not packaging."""
     score = state.get("quality_score")
     score_text = f"{score}/100" if score is not None else "n/a"
+    history = state.get("quality_score_history") or []
+    if len(history) > 1:
+        score_text += f" (previous: {' → '.join(str(s) for s in history[:-1])})"
+    passing = score is not None and score >= 80
+
+    top_fixes = state.get("quality_top_fixes") or []
+    fixes_list = "\n".join(f"{i}. {f}" for i, f in enumerate(top_fixes, 1))
+
+    if passing:
+        chat_note = (
+            f"🧭 Quality phase complete — **{score_text}** (PASS). The Devil's "
+            "Advocate and Consistency reports are in the files panel. Ready to package."
+        )
+        if fixes_list:
+            chat_note += (
+                "\n\nOptional — these would raise the score further:\n" + fixes_list
+            )
+        reasoning = "The specs meet the 80-point quality bar."
+        recommendation = "confirm"
+    else:
+        chat_note = (
+            f"🧭 Quality phase complete — **{score_text}**, below the 80-point bar."
+        )
+        if fixes_list:
+            chat_note += (
+                "\n\n**To raise the score, these are the highest-impact fixes:**\n"
+                + fixes_list
+                + "\n\nApply them all, add your own priority in the text box, or "
+                "package anyway. Full gap analysis: `06_QUALITY/quality_review.md`."
+            )
+        else:
+            chat_note += (
+                " The review lists concrete gaps (see `06_QUALITY/quality_review.md`). "
+                "I recommend an improvement pass before packaging."
+            )
+        reasoning = "Packaging at this score would bake the gaps into the final documents."
+        recommendation = "improve"
 
     return {
         **state,
-        "messages": agent_message(
-            state, "orchestrator",
-            f"🧭 Quality phase complete. Overall score: **{score_text}**. "
-            "The Devil's Advocate and Consistency reports are above — review them "
-            "before packaging.",
-        ),
+        "messages": agent_message(state, "orchestrator", chat_note),
         "current_agent": "orchestrator",
         "pipeline_status": "running",
         "quality_review_done": True,
@@ -184,11 +236,16 @@ async def quality_review_node(state: ProjectState) -> ProjectState:
             "id": "approve-quality",
             "agent": "orchestrator",
             "category": "quality",
-            "question": f"Quality review is done (score: {score_text}). Package the final documents?",
+            "question": f"Quality score: {score_text}. How should we proceed?",
             "options": [
                 {
+                    "id": "improve",
+                    "label": "Improve the specs" + ("" if passing else " (recommended)"),
+                    "description": "Send the gap list back to the agents, revise, and re-score",
+                },
+                {
                     "id": "confirm",
-                    "label": "Package the project",
+                    "label": "Package the project" + (" (recommended)" if passing else " anyway"),
                     "description": "Generate the final document set and roadmap",
                 },
                 {
@@ -197,15 +254,15 @@ async def quality_review_node(state: ProjectState) -> ProjectState:
                     "description": "Ask about the quality gaps or risks",
                 },
             ],
-            "agent_recommendation": "confirm",
-            "agent_reasoning": "All quality checks have run; gaps are documented.",
+            "agent_recommendation": recommendation,
+            "agent_reasoning": reasoning,
             "allow_delegate": True,
             "allow_freeform": True,
         },
     }
 
 
-def _extract_score(text: str) -> tuple[int | None, dict | None]:
+def _extract_score(text: str) -> tuple[int | None, dict | None, list[str]]:
     """Parse the trailing fenced JSON score block from the reviewer's output."""
     try:
         if "```json" in text:
@@ -214,14 +271,16 @@ def _extract_score(text: str) -> tuple[int | None, dict | None]:
             data = json.loads(text[start:end].strip())
             total = data.get("total")
             if isinstance(total, int):
+                fixes = data.get("top_fixes")
+                fixes = [str(f) for f in fixes] if isinstance(fixes, list) else []
                 return total, {
                     **data.get("breakdown", {}),
                     "grade": data.get("grade"),
                     "verdict": data.get("verdict"),
-                }
+                }, fixes
     except (ValueError, json.JSONDecodeError) as e:
         logger.warning(f"Failed to parse quality score JSON: {e}")
-    return None, None
+    return None, None, []
 
 
 def _strip_json_block(text: str) -> str:
