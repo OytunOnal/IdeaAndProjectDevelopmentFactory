@@ -8,6 +8,7 @@ from app.agents.common import (
     agent_message,
     docs_context,
     emit_progress,
+    prior_adjustments_blocklist,
 )
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
@@ -185,11 +186,27 @@ async def _run_report_agent(
     await emit_progress(state, agent_id, f"{emoji} Writing the {title}...")
     docs = docs_context(state, ALL_SPEC_DOCS, max_chars=2500)
 
+    # Re-runs get the applied-adjustments memory — and audit it: verify the
+    # documents actually implement each applied item instead of taking the
+    # application on faith.
+    blocklist = prior_adjustments_blocklist(state)
+    audit = ""
+    if state.get("applied_adjustments"):
+        audit = (
+            "\n\nAUDIT DUTY: for each item in the ALREADY APPLIED list, check "
+            "whether the documents above actually reflect it. If one is NOT "
+            "genuinely implemented in the documents, call it out explicitly in "
+            "a short section titled `## Unimplemented adjustments` (this is an "
+            "audit finding, not a new recommendation). If all are implemented, "
+            "do not mention them."
+        )
+
     try:
         report = await call_llm(
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": docs + f"\n\nWrite the {title} now."},
+                {"role": "user", "content": docs + blocklist + audit
+                 + f"\n\nWrite the {title} now."},
             ],
             model_tier=2,
             api_key=state.get("api_key"),

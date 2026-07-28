@@ -2,7 +2,11 @@
 
 import logging
 
-from app.agents.common import extract_adjustments, get_doc
+from app.agents.common import (
+    extract_adjustments,
+    get_doc,
+    record_applied_adjustments,
+)
 from app.agents.state import ProjectState
 
 logger = logging.getLogger(__name__)
@@ -227,6 +231,8 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                         f"{titles[doc_key]} to the affected documents."
                     ),
                     "quality_rerun_report": doc_key if recheck else None,
+                    # Remember what was applied — the re-run must not re-propose it
+                    "applied_adjustments": record_applied_adjustments(state, doc_key),
                     "decisions": decisions,
                     "messages": messages,
                     "pending_decision": None,
@@ -253,6 +259,8 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                 ),
                 "revision_is_apply": True,
                 "revision_then": "continue" if chosen == "apply" else "review",
+                # Remember what was applied — later docs must not re-propose it
+                "applied_adjustments": record_applied_adjustments(state, doc_key),
                 "decisions": decisions,
                 "messages": messages,
                 "pending_decision": None,

@@ -67,6 +67,9 @@ class ProjectState(TypedDict, total=False):
     quality_improve_focus: str | None
     quality_improve_targets: list
     quality_rerun_report: str | None
+    # Adjustments the user accepted — survives report regeneration, so
+    # re-runs can't re-propose what was already applied
+    applied_adjustments: list
     quality_top_fixes: list
     quality_score_history: list
 

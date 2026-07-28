@@ -214,6 +214,20 @@ async def spec_improver_node(state: ProjectState) -> ProjectState:
             + "\n".join(f"- {f}" for f in top_fixes)
             + "\n\n" + gaps
         )
+    # This pass consumes the reports' recommendations and the top fixes —
+    # record them so re-runs don't re-propose what is being applied.
+    applied = list(state.get("applied_adjustments") or [])
+    for report_key in ("devils_advocate", "consistency_report"):
+        adj = extract_adjustments(get_doc(state, report_key))
+        if adj:
+            entry = f"From {DOC_TITLES.get(report_key, report_key)}:\n{adj}"
+            if entry not in applied:
+                applied.append(entry)
+    if top_fixes:
+        entry = "From Quality Review (top fixes):\n" + "\n".join(f"- {f}" for f in top_fixes)
+        if entry not in applied:
+            applied.append(entry)
+
     # The Devil's Advocate mitigations and consistency findings are part of
     # the improvement input too — they used to be produced and then ignored.
     devils = get_doc(state, "devils_advocate")

@@ -308,6 +308,10 @@ async def test_apply_and_recheck_stays_at_the_da_step(mock_llms):
     assert any("Improvement pass complete" in m["content"] for m in result["messages"])
     assert _pending_id(result) == "approve-doc:devils_advocate"
     assert "devils_advocate" not in (result.get("approved_docs") or [])
+    # The applied mitigations are remembered — re-runs get them as a
+    # blocklist + audit duty instead of re-proposing them
+    applied = result.get("applied_adjustments") or []
+    assert any("Cap initial leverage" in a for a in applied)
     # Continuing normally now proceeds to consistency
     result = await _approve(result, config)
     assert _pending_id(result) == "approve-doc:consistency_report"
@@ -632,6 +636,11 @@ def test_context_strips_adjustments_and_blocklists_them():
     block = prior_adjustments_blocklist(state)
     assert "BLOCKLIST" in block and "Focus Turkey" in block
     assert prior_adjustments_blocklist({}) == ""
+
+    # Applied adjustments survive report regeneration and appear as "DONE"
+    state2 = {"applied_adjustments": ["From Devil's Advocate Report:\n1. Cap leverage."]}
+    block2 = prior_adjustments_blocklist(state2)
+    assert "ALREADY APPLIED" in block2 and "Cap leverage" in block2
 
 
 async def test_no_anthropic_key_falls_back_to_plain_llm(mock_llms, monkeypatch):

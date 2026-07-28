@@ -405,20 +405,46 @@ def strip_adjustments_section(text: str) -> str:
     return (text[: match.start()].rstrip() + ("\n\n" + tail.lstrip() if tail else "")).strip()
 
 
+def record_applied_adjustments(state: ProjectState, source_key: str) -> list:
+    """Return applied_adjustments with the source doc's current items added."""
+    applied = list(state.get("applied_adjustments") or [])
+    adj = extract_adjustments(get_doc(state, source_key))
+    if adj:
+        entry = f"From {DOC_TITLES.get(source_key, source_key)}:\n{adj}"
+        if entry not in applied:
+            applied.append(entry)
+    return applied
+
+
 def prior_adjustments_blocklist(state: ProjectState) -> str:
-    """A prompt block listing adjustments already proposed in earlier docs."""
+    """A prompt block listing adjustments already proposed and already applied."""
+    parts = []
+
     items = []
     for key in DOC_PATHS:
         adj = extract_adjustments(get_doc(state, key))
         if adj:
             items.append(f"From {DOC_TITLES.get(key, key)}:\n{adj}")
-    if not items:
+    if items:
+        parts.append(
+            "ADJUSTMENTS ALREADY PROPOSED to the user in earlier documents — "
+            "this is a BLOCKLIST. Do not propose these again in any wording; "
+            "only materially NEW adjustments are allowed:\n\n"
+            + "\n\n".join(items)
+        )
+
+    applied = state.get("applied_adjustments") or []
+    if applied:
+        parts.append(
+            "ADJUSTMENTS ALREADY APPLIED to the project — these are DONE. "
+            "Never re-propose them or trivial variations of them; treat the "
+            "concerns behind them as addressed unless the documents clearly "
+            "show otherwise:\n\n" + "\n\n".join(applied[-12:])
+        )
+
+    if not parts:
         return ""
-    return (
-        "\n\nADJUSTMENTS ALREADY PROPOSED to the user in earlier documents — "
-        "this is a BLOCKLIST. Do not propose these again in any wording; only "
-        "materially NEW adjustments are allowed:\n\n" + "\n\n".join(items)
-    )
+    return "\n\n" + "\n\n".join(parts)
 
 
 def format_brief(brief: dict) -> str:
