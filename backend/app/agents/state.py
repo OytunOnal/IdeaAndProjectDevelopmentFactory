@@ -25,6 +25,8 @@ class ProjectState(TypedDict, total=False):
     tech_feasibility: dict
     brand_identity: dict
     legal_requirements: dict
+    research_summary: str
+    spec_summary: str
     research_review_done: bool
     research_approved: bool
 
@@ -59,6 +61,8 @@ class ProjectState(TypedDict, total=False):
     approved_docs: list
     revision_target: str | None
     revision_feedback: str | None
+    revision_is_apply: bool
+    revision_then: str | None
     quality_improve_requested: bool
     quality_improve_focus: str | None
     quality_improve_targets: list

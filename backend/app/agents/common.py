@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 
 from app.agents.state import ProjectState
 from app.websocket.socket_app import emit_pipeline_update
@@ -10,9 +11,12 @@ logger = logging.getLogger(__name__)
 
 # Where each document lives in the file tree (drafts + final export)
 DOC_PATHS = {
+    "idea_brief": "00_IDEA/idea_brief.md",
     "market_research": "01_RESEARCH/market_research.md",
     "competitor_analysis": "01_RESEARCH/competitor_analysis.md",
     "tech_feasibility": "01_RESEARCH/tech_feasibility.md",
+    "research_summary": "01_RESEARCH/research_summary.md",
+    "spec_summary": "05_PLANNING/specification_summary.md",
     "prd": "02_PRODUCT/prd.md",
     "ux_design": "03_DESIGN/ux_specification.md",
     "architecture": "04_TECH/architecture.md",
@@ -29,7 +33,13 @@ CONSTRUCTIVE_PRINCIPLE = """
 
 GUIDING PRINCIPLE: Be realistic AND constructive. Your goal is to shape this project into something buildable and commercially viable. Never dismiss an idea or a user request outright — when something is weak or infeasible as stated, propose the nearest viable version (smaller scope, different segment, different pricing, phased approach) and explain the trade-off. Every problem you raise must come with at least one concrete way to address it.
 
-End the document with a section titled exactly `## Recommended Adjustments` containing 1-3 NUMBERED, optional, concrete changes to the PROJECT itself that your findings suggest would improve its viability (e.g. "1. Launch in Germany only first — 60% of the addressable demand is there"). These are proposals for the user to accept or ignore — not editorial notes about the document. If you have no meaningful recommendation, write: None — the current direction holds up."""
+EVIDENCE RULE: never fabricate data. No invented percentages, user tests, betas, surveys, funnels, or market figures — if a number does not literally appear in your inputs or your own web research, do not cite it; make the case qualitatively instead. A made-up "closed-beta drop-off rate" is worse than no evidence.
+
+FINAL SECTION — end your document with exactly this heading:
+
+## Recommended Adjustments
+
+Under it, list up to 3 NUMBERED, concrete changes to the PROJECT itself that your findings suggest. HIGH BAR: only include a recommendation if it would MATERIALLY improve the project's viability, follows directly from a specific finding in your document, and is NEW — never re-propose an adjustment already made in an earlier document (you may be shown a list of those; treat it as a blocklist). Never pad the list with filler, restatements of what the project already does, or generic advice. Having no recommendation is a perfectly good outcome — in that case write exactly: None — the current direction holds up."""
 
 
 SPEC_DOC_KEYS = ("prd", "architecture", "ux_design", "gtm_strategy", "financial_model")
@@ -37,11 +47,11 @@ SPEC_DOC_KEYS = ("prd", "architecture", "ux_design", "gtm_strategy", "financial_
 # Instruction block that lets discussion agents ACT instead of giving advice
 ACTION_CAPABILITY = """
 
-YOU CAN TAKE ACTION. There are no UI forms, menus, or buttons for the user to fill in — never instruct them to click or paste anything. When the user asks you to change, fix, or improve documents (rather than asking a question), do NOT explain how — trigger the work yourself by responding with ONLY a fenced JSON block:
+YOU CAN TAKE ACTION. There are no UI forms, menus, or buttons for the user to fill in — never instruct them to click or paste anything. When the user's message is a request rather than a question, do NOT explain how — trigger the work yourself by responding with ONLY a fenced JSON block:
 
-To rewrite one document with specific feedback:
+To rewrite one document with specific feedback (also use this when the user asks to apply SOME of a document's Recommended Adjustments — name the items in the feedback). Include "then": "continue" ONLY when the user explicitly wants to skip reviewing the result ("apply and move on", "ekle ve sonrakine geç"). "Re-run this step and continue from there" ("baştan çalıştır ve oradan devam edelim") means they DO want to see the re-run output — use "then": "review":
 ```json
-{"action": "revise", "target": "<one of: market_research|competitor_analysis|tech_feasibility|prd|architecture|ux_design|gtm_strategy|financial_model>", "feedback": "<the concrete change request, self-contained>"}
+{"action": "revise", "target": "<one of: market_research|competitor_analysis|tech_feasibility|prd|architecture|ux_design|gtm_strategy|financial_model>", "feedback": "<the concrete change request, self-contained>", "then": "continue|review"}
 ```
 
 To run an improvement pass across the specs (e.g. fixing quality gaps or consistency issues):
@@ -49,7 +59,23 @@ To run an improvement pass across the specs (e.g. fixing quality gaps or consist
 {"action": "improve", "focus": "<what to prioritize>", "targets": ["<optional doc keys to limit the pass>"]}
 ```
 
-Only answer in plain text when the user is genuinely asking a question, not requesting changes."""
+To approve the document currently awaiting approval — use this when the user signals acceptance or wants to move on WITHOUT changing the document (e.g. "looks good", "noted, let's continue", "save these suggestions for later and proceed"):
+```json
+{"action": "approve", "target": "<doc_key of the document awaiting approval>"}
+```
+
+To go BACK to an earlier step of the current phase ("devils advocate adımına geri dönelim", "go back to the PRD") — this reopens that document's approval gate WITHOUT rewriting anything:
+```json
+{"action": "reopen", "target": "<doc_key>"}
+```
+
+IMPORTANT — intent rules (the user may write in any language, often Turkish; judge intent, not keywords):
+- "rewrite this" / "redo it" / "tekrar yazar mısın" / "baştan yaz" → revise. If they gave no specifics, use feedback: "Rewrite the document from scratch with substantially higher quality and specificity."
+- "go back to X" / "X adımına geri dönelim" → reopen (navigation, NOT a rewrite).
+- "looks good" / "let's continue" / "devam edelim" / "sonrakine geç" → approve.
+- A request for changes NEVER means approve, and wanting to continue NEVER means revise.
+- If the intent is genuinely ambiguous, ask one short clarifying question in plain text — never approve on an ambiguous message. Only answer in plain text when the user is asking a question.
+- If the message is unrelated to this project (small talk, random text, a different topic), take NO action and do not force a connection to the project — reply in one friendly sentence that you're focused on this project and point back to what's currently pending."""
 
 
 def parse_action(text: str) -> dict | None:
@@ -62,10 +88,102 @@ def parse_action(text: str) -> dict | None:
         start = text.index("```json") + 7
         end = text.index("```", start)
         data = _json.loads(text[start:end].strip())
-        if isinstance(data, dict) and data.get("action") in ("revise", "improve"):
+        if isinstance(data, dict) and data.get("action") in (
+            "revise", "improve", "approve", "reopen"
+        ):
             return data
     except (ValueError, _json.JSONDecodeError):
         pass
+    return None
+
+
+# Which documents belong to which phase's gates (reopen is same-phase only —
+# cross-phase rollback would need phase state rewinding)
+PHASE_DOC_KEYS = {
+    "discovery": ("market_research", "competitor_analysis", "tech_feasibility"),
+    "specification": ("prd", "architecture", "ux_design", "gtm_strategy", "financial_model"),
+    "quality": ("devils_advocate", "consistency_report"),
+}
+
+# How users refer to documents in chat (lowercase substrings, EN + TR)
+DOC_ALIASES = {
+    "market_research": ("market", "pazar"),
+    "competitor_analysis": ("competitor", "rakip"),
+    "tech_feasibility": ("tech feasibility", "feasibility", "fizibilite"),
+    "prd": ("prd",),
+    "architecture": ("architecture", "mimari"),
+    "ux_design": ("ux",),
+    "gtm_strategy": ("gtm", "go-to-market"),
+    "financial_model": ("financial", "finans"),
+    "devils_advocate": ("devil", "şeytan"),
+    "consistency_report": ("consistency", "tutarl"),
+}
+
+_REOPEN_REQUEST = re.compile(
+    r"(?i)go back to|return to|reopen|geri dön|geri don|adımına dön|adimina don"
+)
+
+
+def reopen_request_shortcut(state: ProjectState) -> dict | None:
+    """'Go back to step X' handled deterministically — navigation, not rewrite."""
+    messages = state.get("messages") or []
+    if not messages or messages[-1].get("role") != "user":
+        return None
+    msg = messages[-1].get("content", "")
+    if not _REOPEN_REQUEST.search(msg):
+        return None
+    lower = msg.lower()
+    matches = [
+        key for key, aliases in DOC_ALIASES.items()
+        if any(alias in lower for alias in aliases)
+    ]
+    if len(matches) != 1:
+        return None  # no target or ambiguous — let the LLM sort it out
+    return apply_discussion_action(state, {"action": "reopen", "target": matches[0]})
+
+
+# Unambiguous rewrite requests — handled deterministically, no LLM
+# classification involved (a weak model once read "tekrar yazar mısın"
+# as approval and silently moved on).
+_REWRITE_REQUEST = re.compile(
+    r"(?i)\brewrite\b|\bredo\b|\bregenerate\b|\bre-?run\b|write (?:it|this) again"
+    r"|(?:tekrar|yeniden|baştan|bastan)\s*(?:yaz|çalıştır|calistir|oluştur|olustur|üret|uret)"
+)
+
+
+def rewrite_request_shortcut(state: ProjectState) -> dict | None:
+    """If the last user message clearly asks to rewrite the gated document,
+    trigger the revision directly — don't gamble on LLM intent parsing."""
+    messages = state.get("messages") or []
+    if not messages or messages[-1].get("role") != "user":
+        return None
+    msg = messages[-1].get("content", "")
+    if not _REWRITE_REQUEST.search(msg):
+        return None
+    gate = current_gate_key(state)
+    if not gate:
+        return None
+    # If a DIFFERENT document is named, let the LLM route it instead
+    lower = msg.lower()
+    for key in DOC_PATHS:
+        if key != gate and (key in lower or key.replace("_", " ") in lower):
+            return None
+    feedback = msg
+    if len(msg.strip()) < 60:  # bare "rewrite this" — give the agent a real brief
+        feedback = (
+            f"{msg}\n\nRewrite the document from scratch with substantially "
+            "higher quality, more specificity, and better grounding."
+        )
+    return apply_discussion_action(
+        state, {"action": "revise", "target": gate, "feedback": feedback}
+    )
+
+
+def current_gate_key(state: ProjectState) -> str | None:
+    """The doc key currently awaiting approval, if any."""
+    card = current_gate_card(state)
+    if card and card["id"].startswith("approve-doc:"):
+        return card["id"].split(":", 1)[1]
     return None
 
 
@@ -73,18 +191,69 @@ def apply_discussion_action(state: ProjectState, action: dict) -> dict | None:
     """Turn a discussion agent's action JSON into pipeline state, or None."""
     act = action.get("action")
 
+    if act == "approve":
+        target = action.get("target") or current_gate_key(state)
+        if target in DOC_PATHS and get_doc(state, target):
+            approved = list(state.get("approved_docs") or [])
+            if target not in approved:
+                approved.append(target)
+            return {
+                **state,
+                "approved_docs": approved,
+                "messages": agent_message(
+                    state, "orchestrator",
+                    f"✅ {DOC_TITLES.get(target, target)} approved — moving on.",
+                ),
+                "current_agent": "orchestrator",
+                "pipeline_status": "running",
+                "pending_decision": None,
+            }
+        return None
+
+    if act == "reopen":
+        target = action.get("target")
+        phase = state.get("current_phase")
+        if (
+            target in PHASE_DOC_KEYS.get(phase, ())
+            and get_doc(state, target)
+        ):
+            approved = [k for k in (state.get("approved_docs") or []) if k != target]
+            return {
+                **state,
+                "approved_docs": approved,
+                "messages": agent_message(
+                    state, "orchestrator",
+                    f"🔁 Reopened the {DOC_TITLES.get(target, target)} — it's in "
+                    f"the files panel (`{DOC_PATHS.get(target, '')}`), unchanged. "
+                    "Approve it, request changes, or ask to re-run it.",
+                ),
+                "current_agent": "orchestrator",
+                "pipeline_status": "running",
+                "pending_decision": doc_gate_card(
+                    target, bool(extract_adjustments(get_doc(state, target)))
+                ),
+            }
+        return None
+
     if act == "revise":
         target = action.get("target")
         feedback = (action.get("feedback") or "").strip()
         if target in DOC_PATHS and get_doc(state, target) and feedback:
+            then = "continue" if action.get("then") == "continue" else None
+            # Applying the doc's own adjustments? Consume them after the rewrite.
+            is_apply = "adjustment" in feedback.lower()
             return {
                 **state,
                 "revision_target": target,
                 "revision_feedback": feedback,
+                "revision_is_apply": is_apply,
+                "revision_then": then,
                 "messages": agent_message(
                     state, "orchestrator",
                     f"✏️ On it — sending your request to the "
-                    f"{DOC_TITLES.get(target, target)} owner...",
+                    f"{DOC_TITLES.get(target, target)} owner"
+                    + (" (will continue afterwards)" if then else "")
+                    + "...",
                 ),
                 "current_agent": "orchestrator",
                 "pipeline_status": "running",
@@ -124,19 +293,68 @@ def apply_discussion_action(state: ProjectState, action: dict) -> dict | None:
     return None
 
 
+# Tolerant heading match. Models write the section heading every way
+# imaginable: "## Recommended Adjustments", "### recommended adjustments",
+# "**Recommended Adjustments:**", numbered ("## 6. Recommended Adjustments"),
+# or translated when the whole document comes out in Turkish
+# ("## Önerilen Ayarlamalar"). Missing it in either direction is a UX bug:
+# a missed heading hides real suggestions; a missed "None" shows dead buttons.
+_ADJUSTMENTS_HEADING = re.compile(
+    r"(?im)^[ \t]{0,3}(?:#{2,4}[ \t]*|\*\*[ \t]*)?(?:\d+[.)][ \t]*)?"
+    r"(?:recommended[ \t]+adjustments?"
+    r"|önerilen[ \t]+(?:ayarlamalar|düzenlemeler|değişiklikler|iyileştirmeler)"
+    r"|tavsiye[ \t]+edilen[ \t]+(?:ayarlamalar|düzenlemeler|değişiklikler))"
+    r"[^\S\n]*[:*]{0,3}[^\S\n]*$"
+)
+
+
 def extract_adjustments(text: str | None) -> str | None:
-    """Pull the `## Recommended Adjustments` section out of a document."""
-    if not text or "## Recommended Adjustments" not in text:
+    """Pull the Recommended Adjustments section out of a document."""
+    if not text:
         return None
-    start = text.index("## Recommended Adjustments") + len("## Recommended Adjustments")
-    rest = text[start:]
-    end = rest.find("\n## ")
-    section = (rest[:end] if end != -1 else rest).strip()
-    if not section or section.lower().startswith("none"):
+    match = _ADJUSTMENTS_HEADING.search(text)
+    if not match:
+        return None
+    rest = text[match.end():]
+    # Section ends at the next heading (or end of document)
+    next_heading = re.search(r"(?m)^[ \t]{0,3}#{1,4}[ \t]", rest)
+    section = (rest[: next_heading.start()] if next_heading else rest).strip()
+    # "None" may arrive decorated ("**None** — ...", "- None ...") or in
+    # Turkish ("Yok — mevcut yön uygun.")
+    normalized = section.lower().lstrip("*_-•>#:().0123456789 \t\n")
+    if not section or normalized.startswith(("none", "yok", "hayır")):
         return None
     return section
 
+
+def consume_adjustments(text: str) -> str:
+    """Replace the Recommended Adjustments section with an 'applied' note.
+
+    Called after adjustments are applied in a revision. Without this, the
+    revision prompt's mandatory-section rule makes the model re-propose the
+    same items, and the approval gate loops forever.
+    """
+    match = _ADJUSTMENTS_HEADING.search(text)
+    if match:
+        rest = text[match.end():]
+        next_heading = re.search(r"(?m)^[ \t]{0,3}#{1,4}[ \t]", rest)
+        tail = rest[next_heading.start():] if next_heading else ""
+        text = text[: match.start()].rstrip() + ("\n\n" + tail.strip() if tail else "")
+    return (
+        text.rstrip()
+        + "\n\n## Recommended Adjustments\n\nNone — the accepted adjustments have been applied.\n"
+    )
+
+
+# Note: no fallback generator on purpose. If a document carries no
+# Recommended Adjustments section (or says "None"), that means "nothing
+# worth suggesting" — the gate simply shows no apply buttons. Forcing
+# suggestions into existence produced filler recommendations.
+
 DOC_TITLES = {
+    "idea_brief": "Idea Brief",
+    "research_summary": "Research Summary",
+    "spec_summary": "Specification Summary",
     "market_research": "Market Research",
     "competitor_analysis": "Competitor Analysis",
     "tech_feasibility": "Tech Feasibility",
@@ -161,13 +379,73 @@ def get_doc(state: ProjectState, key: str) -> str | None:
 
 
 def docs_context(state: ProjectState, keys: list[str], max_chars: int = 12000) -> str:
-    """Concatenate the requested documents as markdown context for a prompt."""
+    """Concatenate the requested documents as markdown context for a prompt.
+
+    Each document's Recommended Adjustments section is stripped first —
+    downstream agents were parroting earlier documents' suggestions as
+    their own.
+    """
     parts = []
     for key in keys:
         doc = get_doc(state, key)
         if doc:
+            doc = strip_adjustments_section(doc)
             parts.append(f"## {DOC_TITLES.get(key, key)}\n\n{doc[:max_chars]}")
     return "\n\n---\n\n".join(parts)
+
+
+def strip_adjustments_section(text: str) -> str:
+    """Remove the Recommended Adjustments section from a document."""
+    match = _ADJUSTMENTS_HEADING.search(text)
+    if not match:
+        return text
+    rest = text[match.end():]
+    next_heading = re.search(r"(?m)^[ \t]{0,3}#{1,4}[ \t]", rest)
+    tail = rest[next_heading.start():] if next_heading else ""
+    return (text[: match.start()].rstrip() + ("\n\n" + tail.lstrip() if tail else "")).strip()
+
+
+def prior_adjustments_blocklist(state: ProjectState) -> str:
+    """A prompt block listing adjustments already proposed in earlier docs."""
+    items = []
+    for key in DOC_PATHS:
+        adj = extract_adjustments(get_doc(state, key))
+        if adj:
+            items.append(f"From {DOC_TITLES.get(key, key)}:\n{adj}")
+    if not items:
+        return ""
+    return (
+        "\n\nADJUSTMENTS ALREADY PROPOSED to the user in earlier documents — "
+        "this is a BLOCKLIST. Do not propose these again in any wording; only "
+        "materially NEW adjustments are allowed:\n\n" + "\n\n".join(items)
+    )
+
+
+def format_brief(brief: dict) -> str:
+    """Render the structured idea brief as readable markdown."""
+    users = ", ".join(
+        f"{u.get('type', '?')} ({u.get('priority', '')})"
+        for u in brief.get("target_users", [])
+    )
+    features = "\n".join(f"- {f}" for f in brief.get("core_features", []))
+    scope_in = ", ".join(brief.get("scope_in", []))
+    scope_out = ", ".join(brief.get("scope_out", []))
+
+    return (
+        f"**Problem:** {brief.get('problem_statement', '—')}\n\n"
+        f"**Target users:** {users or '—'}\n\n"
+        f"**Value proposition:** {brief.get('value_proposition', '—')}\n\n"
+        f"**Core features:**\n{features or '—'}\n\n"
+        f"**Revenue model:** {brief.get('revenue_model', '—')}\n\n"
+        f"**Category:** {brief.get('domain_category', '—')}\n\n"
+        f"**In scope (v1):** {scope_in or '—'}\n\n"
+        f"**Out of scope (v1):** {scope_out or '—'}"
+        + (
+            f"\n\n**Additional context:** {brief['additional_context']}"
+            if brief.get("additional_context")
+            else ""
+        )
+    )
 
 
 def brief_context(state: ProjectState) -> str:
@@ -208,13 +486,19 @@ def doc_gate_card(key: str, has_adjustments: bool = False) -> dict:
     ]
     if has_adjustments:
         question += (
-            " It ends with numbered Recommended Adjustments — apply all of them, "
-            "pick some (type e.g. 'apply 1 and 3'), or approve as-is."
+            " It ends with numbered Recommended Adjustments — apply them and "
+            "keep moving, apply and re-review, or approve as-is. To apply only "
+            "some, type in the chat (e.g. 'apply 1 and 3')."
         )
         options.append({
             "id": "apply",
-            "label": "Apply the recommended adjustments",
-            "description": "Integrate all numbered recommendations into the project",
+            "label": "Apply adjustments & continue",
+            "description": "Integrate the recommendations and move on — no extra review round",
+        })
+        options.append({
+            "id": "apply_review",
+            "label": "Apply adjustments & review again",
+            "description": "Integrate the recommendations, then show me the result",
         })
     options.append({
         "id": "revise",
@@ -228,8 +512,12 @@ def doc_gate_card(key: str, has_adjustments: bool = False) -> dict:
         "category": "strategic",
         "question": question,
         "options": options,
-        "agent_recommendation": "confirm",
-        "agent_reasoning": "Review the document before the pipeline builds on it.",
+        "agent_recommendation": "apply" if has_adjustments else "confirm",
+        "agent_reasoning": (
+            "The adjustments come from the document's own findings."
+            if has_adjustments
+            else "Review the document before the pipeline builds on it."
+        ),
         "allow_delegate": True,
         "allow_freeform": True,
     }
@@ -254,6 +542,12 @@ def current_gate_card(state: ProjectState) -> dict | None:
     if phase == "specification":
         for key in ("prd", "architecture", "ux_design", "gtm_strategy", "financial_model"):
             if state.get(key) and key not in approved:
+                return doc_gate_card(key, bool(extract_adjustments(get_doc(state, key))))
+        return None
+
+    if phase == "quality":
+        for key in ("devils_advocate", "consistency_report"):
+            if get_doc(state, key) and key not in approved:
                 return doc_gate_card(key, bool(extract_adjustments(get_doc(state, key))))
         return None
 

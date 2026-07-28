@@ -1,9 +1,7 @@
 "use client";
 
-import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 
 interface DecisionOption {
   id: string;
@@ -23,13 +21,12 @@ interface DecisionCardProps {
     allow_freeform: boolean;
   };
   onSubmit: (action: string, option?: string, customInput?: string) => void;
+  disabled?: boolean;
   resolved?: boolean;
   resolvedChoice?: string;
 }
 
-export function DecisionCard({ decision, onSubmit, resolved, resolvedChoice }: DecisionCardProps) {
-  const [customInput, setCustomInput] = useState("");
-
+export function DecisionCard({ decision, onSubmit, disabled, resolved, resolvedChoice }: DecisionCardProps) {
   if (resolved) {
     return (
       <Card className="border-green-800 bg-green-950/30 p-4">
@@ -54,6 +51,7 @@ export function DecisionCard({ decision, onSubmit, resolved, resolvedChoice }: D
             key={opt.id}
             variant={opt.id === decision.agent_recommendation ? "default" : "outline"}
             size="sm"
+            disabled={disabled}
             onClick={() => onSubmit("choose", opt.id)}
           >
             {opt.label}
@@ -65,6 +63,7 @@ export function DecisionCard({ decision, onSubmit, resolved, resolvedChoice }: D
           <Button
             variant="ghost"
             size="sm"
+            disabled={disabled}
             onClick={() => onSubmit("delegate")}
           >
             You decide
@@ -73,22 +72,10 @@ export function DecisionCard({ decision, onSubmit, resolved, resolvedChoice }: D
       </div>
 
       {decision.allow_freeform && (
-        <div className="flex gap-2">
-          <Input
-            value={customInput}
-            onChange={(e) => setCustomInput(e.target.value)}
-            placeholder="Or type your own answer..."
-            className="text-sm"
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onSubmit("custom", undefined, customInput)}
-            disabled={!customInput.trim()}
-          >
-            Send
-          </Button>
-        </div>
+        <p className="text-xs text-muted-foreground">
+          Or just type in the chat — a change request, a question, or
+          &ldquo;looks good, continue&rdquo;.
+        </p>
       )}
     </Card>
   );

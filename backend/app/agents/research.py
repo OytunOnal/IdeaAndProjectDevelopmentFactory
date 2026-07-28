@@ -18,9 +18,13 @@ from app.agents.common import (
     apply_discussion_action,
     brief_context,
     current_gate_card,
+    current_gate_key,
     emit_progress,
     extract_adjustments,
     parse_action,
+    prior_adjustments_blocklist,
+    reopen_request_shortcut,
+    rewrite_request_shortcut,
 )
 from app.agents.llm import call_anthropic_web_search, call_llm
 from app.agents.state import ProjectState
@@ -115,6 +119,7 @@ async def _run_research_agent(state: ProjectState, agent_id: str) -> ProjectStat
     context = brief_context(state)
     user_content = (
         f"{context}\n\nResearch this project idea now and produce your report."
+        + prior_adjustments_blocklist(state)
     )
 
     anthropic_key = _resolve_anthropic_key(state)
@@ -208,9 +213,20 @@ async def tech_feasibility_node(state: ProjectState) -> ProjectState:
 
 async def research_discussion_node(state: ProjectState) -> ProjectState:
     """Answer user questions about the research before they approve it."""
+    # Clear navigation/rewrite requests → handled deterministically,
+    # skipping LLM intent parsing
+    shortcut = reopen_request_shortcut(state) or rewrite_request_shortcut(state)
+    if shortcut:
+        return shortcut
     reports = "\n\n---\n\n".join(
         f"## {spec['title']}\n\n{state.get(spec['output_key'], {}).get('report', 'N/A')}"
         for spec in _AGENTS.values()
+    )
+    gate_key = current_gate_key(state)
+    gate_note = (
+        f"\n\nDocument currently awaiting the user's approval: {gate_key}"
+        if gate_key
+        else ""
     )
     system = (
         "You are the Orchestrator of ProjectFactory. The user has questions about "
@@ -219,6 +235,7 @@ async def research_discussion_node(state: ProjectState) -> ProjectState:
         "is worried about a finding, suggest how the project could adapt (smaller "
         "scope, different segment, different positioning)."
         + ACTION_CAPABILITY
+        + gate_note
         + "\n\n" + reports
     )
 
@@ -324,12 +341,16 @@ async def research_review_node(state: ProjectState) -> ProjectState:
         "id": f"msg-agent-{len(messages)}",
         "role": "agent",
         "agent_id": "orchestrator",
-        "content": f"🧭 **Research Summary**\n\n{summary}",
+        "content": (
+            "🧭 **Research phase complete** — executive summary opened in the "
+            f"files panel (`{DOC_PATHS['research_summary']}`)."
+        ),
         "timestamp": "",
     })
 
     return {
         **state,
+        "research_summary": summary,
         "messages": messages,
         "current_agent": "orchestrator",
         "pipeline_status": "waiting_for_user",

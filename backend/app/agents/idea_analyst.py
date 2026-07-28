@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
@@ -53,7 +54,10 @@ WHEN ALL FIELDS ARE GATHERED, present the complete brief and end with this JSON:
 {"action": "present_brief", "brief": {"problem_statement": "...", "target_users": [{"type": "...", "description": "...", "priority": "primary|secondary"}], "value_proposition": "...", "core_features": ["..."], "revenue_model": "...", "domain_category": "...", "scope_in": ["..."], "scope_out": ["..."], "additional_context": "..."}}
 ```
 
-Only output JSON when presenting the FINAL brief, not while asking questions."""
+Only output JSON when presenting the FINAL brief, not while asking questions.
+When you present the final brief, output ONLY the JSON block (a one-sentence
+lead-in is fine) — do NOT restate the brief in prose. The interface renders
+the brief for the user itself."""
 
 
 async def idea_analyst_node(state: ProjectState) -> ProjectState:
@@ -105,8 +109,13 @@ async def idea_analyst_node(state: ProjectState) -> ProjectState:
     # Check if response contains a brief JSON block
     idea_brief = _extract_brief(response_text)
     if idea_brief:
-        # Never show raw JSON in chat — replace it with a readable summary
-        response_text = _strip_brief_block(response_text) + _format_brief(idea_brief)
+        # The brief goes to the files panel, not the chat — replace whatever
+        # the model wrote with a short pointer note.
+        response_text = (
+            "📋 **Project brief is ready** — opened in the files panel "
+            "(`00_IDEA/idea_brief.md`). Review it, then confirm below or tell "
+            "me what to change."
+        )
 
     # Add agent response to messages
     agent_msg = {
@@ -152,51 +161,48 @@ async def idea_analyst_node(state: ProjectState) -> ProjectState:
         }
 
 
-def _strip_brief_block(text: str) -> str:
-    """Remove the fenced ```json present_brief block from the chat text."""
-    if "```json" not in text:
-        return text.strip()
-    start = text.index("```json")
-    end = text.find("```", start + 7)
-    if end == -1:
-        return text[:start].strip()
-    return (text[:start] + text[end + 3:]).strip()
-
-
-def _format_brief(brief: dict) -> str:
-    """Render the extracted brief as readable markdown for the chat."""
-    users = ", ".join(
-        f"{u.get('type', '?')} ({u.get('priority', '')})"
-        for u in brief.get("target_users", [])
-    )
-    features = "\n".join(f"- {f}" for f in brief.get("core_features", []))
-    scope_in = ", ".join(brief.get("scope_in", []))
-    scope_out = ", ".join(brief.get("scope_out", []))
-
-    return (
-        "\n\n📋 **Project Brief**\n\n"
-        f"**Problem:** {brief.get('problem_statement', '—')}\n\n"
-        f"**Target users:** {users or '—'}\n\n"
-        f"**Value proposition:** {brief.get('value_proposition', '—')}\n\n"
-        f"**Core features:**\n{features or '—'}\n\n"
-        f"**Revenue model:** {brief.get('revenue_model', '—')}\n\n"
-        f"**In scope (v1):** {scope_in or '—'}\n\n"
-        f"**Out of scope (v1):** {scope_out or '—'}"
-    )
-
-
 def _extract_brief(text: str) -> dict | None:
-    """Extract the idea brief JSON from the agent's response, if present."""
-    try:
-        # Look for JSON block in markdown code fence
-        if '```json' in text and '"action": "present_brief"' in text:
-            start = text.index('```json') + 7
-            end = text.index('```', start)
-            json_str = text[start:end].strip()
-            data = json.loads(json_str)
-            if data.get("action") == "present_brief" and "brief" in data:
-                return data["brief"]
-    except (ValueError, json.JSONDecodeError) as e:
-        logger.warning(f"Failed to parse brief JSON: {e}")
+    """Extract the idea brief JSON from the agent's response, if present.
 
+    Tolerant on purpose: models fence the JSON as ```json / ``` / ```JSON,
+    write "action":"present_brief" without spaces, or skip the fence entirely.
+    A missed parse means the whole brief gets dumped into the chat, so we try
+    every fenced block first and then a raw top-level object as fallback.
+    """
+    if "present_brief" not in text:
+        return None
+
+    def _check(data) -> dict | None:
+        if isinstance(data, dict) and data.get("action") == "present_brief":
+            brief = data.get("brief")
+            if isinstance(brief, dict) and brief:
+                return brief
+        return None
+
+    # 1) Any fenced code block containing the marker
+    for match in re.finditer(r"```[a-zA-Z]*\s*(.*?)```", text, re.DOTALL):
+        block = match.group(1).strip()
+        if "present_brief" not in block:
+            continue
+        try:
+            brief = _check(json.loads(block))
+            if brief:
+                return brief
+        except json.JSONDecodeError:
+            continue
+
+    # 2) Unfenced fallback: decode from the top-level "{" before "action"
+    anchor = text.find('"action"')
+    if anchor != -1:
+        start = text.rfind("{", 0, anchor)
+        if start != -1:
+            try:
+                data, _ = json.JSONDecoder().raw_decode(text[start:])
+                brief = _check(data)
+                if brief:
+                    return brief
+            except json.JSONDecodeError:
+                pass
+
+    logger.warning("present_brief marker found but no parseable brief JSON")
     return None

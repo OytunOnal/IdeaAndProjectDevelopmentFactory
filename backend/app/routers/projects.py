@@ -1,6 +1,8 @@
 """Project endpoints - CRUD and pipeline control."""
 
+import asyncio
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -18,6 +20,11 @@ from app.websocket.socket_app import emit_pipeline_update
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# One pipeline run at a time per project: a double-clicked decision (or an
+# overlapping chat message) must queue behind the in-flight run, not race it
+# on the same checkpoint state.
+_pipeline_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 @router.post("/projects", response_model=ProjectResponse, status_code=201)
@@ -100,7 +107,8 @@ async def start_pipeline(project_id: str, body: dict | None = None):
     thread_config = {"configurable": {"thread_id": project_id}}
 
     try:
-        result = await graph.pipeline.ainvoke(initial_state, config=thread_config)
+        async with _pipeline_locks[project_id]:
+            result = await graph.pipeline.ainvoke(initial_state, config=thread_config)
 
         project_store.update(
             project_id,
@@ -159,31 +167,31 @@ async def send_chat_message(project_id: str, body: dict):
 
     thread_config = {"configurable": {"thread_id": project_id}}
 
-    # Get current state from checkpointer
-    current_state = await graph.pipeline.aget_state(thread_config)
-
-    if not current_state.values:
-        return {"error": "No active pipeline for this project. Call /start first."}
-
-    state = dict(current_state.values)
-
-    # Add user message
-    messages = list(state.get("messages", []))
-    messages.append({
-        "id": f"msg-user-{len(messages)}",
-        "role": "user",
-        "content": message,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
-    state["messages"] = messages
-    state["pipeline_status"] = "running"
-    state["api_key"] = api_key or state.get("api_key", "")
-    # A free-text message answers any open decision card
-    state["pending_decision"] = None
-
-    # Re-run pipeline with updated state
     try:
-        result = await graph.pipeline.ainvoke(state, config=thread_config)
+        # Read-modify-run must be atomic per project
+        async with _pipeline_locks[project_id]:
+            current_state = await graph.pipeline.aget_state(thread_config)
+
+            if not current_state.values:
+                return {"error": "No active pipeline for this project. Call /start first."}
+
+            state = dict(current_state.values)
+
+            # Add user message
+            messages = list(state.get("messages", []))
+            messages.append({
+                "id": f"msg-user-{len(messages)}",
+                "role": "user",
+                "content": message,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            state["messages"] = messages
+            state["pipeline_status"] = "running"
+            state["api_key"] = api_key or state.get("api_key", "")
+            # A free-text message answers any open decision card
+            state["pending_decision"] = None
+
+            result = await graph.pipeline.ainvoke(state, config=thread_config)
 
         project_store.update(
             project_id,
@@ -203,18 +211,28 @@ async def submit_decision(project_id: str, body: DecisionSubmit):
     """Submit a user decision and resume the pipeline."""
     thread_config = {"configurable": {"thread_id": project_id}}
 
-    current_state = await graph.pipeline.aget_state(thread_config)
-    if not current_state.values:
-        return {"error": "No active pipeline for this project."}
-
-    state = dict(current_state.values)
-
-    # Resolve the decision
-    updated_state = resolve_decision(state, body.model_dump())
-
-    # Re-run pipeline
     try:
-        result = await graph.pipeline.ainvoke(updated_state, config=thread_config)
+        # Read-modify-run must be atomic per project (a double-clicked button
+        # queues here instead of racing the in-flight run)
+        async with _pipeline_locks[project_id]:
+            current_state = await graph.pipeline.aget_state(thread_config)
+            if not current_state.values:
+                return {"error": "No active pipeline for this project."}
+
+            state = dict(current_state.values)
+
+            # Stale-card guard: the client decided on a card that is no longer
+            # pending (e.g. the duplicate of a double-click, arriving after the
+            # first run already consumed the card) — ignore it.
+            pending = state.get("pending_decision")
+            if not pending:
+                return {"ignored": "No pending decision — this card was already resolved.",
+                        **_pipeline_response(state)}
+
+            # Resolve the decision
+            updated_state = resolve_decision(state, body.model_dump())
+
+            result = await graph.pipeline.ainvoke(updated_state, config=thread_config)
 
         project_store.update(
             project_id,

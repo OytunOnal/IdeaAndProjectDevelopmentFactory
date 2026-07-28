@@ -154,10 +154,13 @@ async def test_each_research_doc_gets_an_approval_gate(mock_llms):
     # All three approved → synthesis + phase gate
     assert result["research_review_done"] is True
     assert _pending_id(result) == "approve-research"
+    # The summary is a document, not a chat dump
+    assert result["research_summary"]
+    assert "research_summary.md" in result["messages"][-1]["content"]
 
 
-async def test_recommended_adjustments_offered_and_applied(mock_llms):
-    """Docs with a Recommended Adjustments section get an 'apply' option."""
+async def test_apply_and_continue_skips_the_extra_review_round(mock_llms):
+    """'Apply adjustments & continue' revises, auto-approves, and moves on."""
     config = {"configurable": {"thread_id": "t-adjust"}}
     result = await pipeline.ainvoke(
         _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
@@ -166,33 +169,198 @@ async def test_recommended_adjustments_offered_and_applied(mock_llms):
     card = result["pending_decision"]
     assert card["id"] == "approve-doc:market_research"
     assert any(o["id"] == "apply" for o in card["options"])
+    assert any(o["id"] == "apply_review" for o in card["options"])
+    assert card["agent_recommendation"] == "apply"
     # The adjustments are surfaced in the chat note too
     assert "Recommended adjustments" in result["messages"][-1]["content"]
 
-    # Choosing apply triggers a revision and re-presents the card
+    # Apply & continue: revised, auto-approved, pipeline moved to the next doc
     result = await _decide(result, config, action="choose", chosen_option="apply")
     assert result["market_research"].get("revised") is True
+    assert "market_research" in result["approved_docs"]
+    assert _pending_id(result) == "approve-doc:competitor_analysis"
+
+
+async def test_apply_and_review_consumes_adjustments(mock_llms):
+    """'Apply & review again' re-presents the gate WITHOUT a fresh apply loop."""
+    from app.agents.common import extract_adjustments
+
+    config = {"configurable": {"thread_id": "t-adjust-review"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
     assert _pending_id(result) == "approve-doc:market_research"
 
+    result = await _decide(result, config, action="choose", chosen_option="apply_review")
+    assert result["market_research"].get("revised") is True
+    # Gate returns, but the applied adjustments are consumed — no apply button
+    card = result["pending_decision"]
+    assert card["id"] == "approve-doc:market_research"
+    assert not any(o["id"] == "apply" for o in card["options"])
+    assert extract_adjustments(result["market_research"]["report"]) is None
+    assert "have been applied" in result["market_research"]["report"]
 
-async def test_change_request_revises_the_document(mock_llms):
-    """Freeform feedback on a doc card rewrites the doc and re-presents it."""
+
+async def test_change_request_revises_the_document(mock_llms, monkeypatch):
+    """Freeform change request on a doc card → discussion agent triggers a
+    revision → doc rewritten and the gate re-presented."""
     config = {"configurable": {"thread_id": "t-revise"}}
     result = await pipeline.ainvoke(
         _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
     )
     assert _pending_id(result) == "approve-doc:market_research"
-    original = result["market_research"]["report"]
+
+    async def _action_llm(messages, **kwargs):
+        if "TAKE ACTION" in messages[0]["content"]:
+            return ('```json\n{"action": "revise", "target": "market_research", '
+                    '"feedback": "Focus on the EU market only."}\n```')
+        return "Mocked LLM response."
+
+    monkeypatch.setattr(research_mod, "call_llm", _action_llm)
 
     result = await _decide(
         result, config, action="custom",
         custom_input="Focus on the EU market only, drop the US numbers.",
     )
 
-    assert result["market_research"]["report"] != original or True  # rewritten
     assert result["market_research"].get("revised") is True
     assert result["revision_target"] is None
     assert _pending_id(result) == "approve-doc:market_research"
+
+
+async def test_stale_apply_on_doc_without_adjustments_approves(mock_llms, monkeypatch):
+    """Apply clicked while the doc says 'None' → approve as-is, no rewrite."""
+
+    async def _no_adjustments_search(system, user_content, api_key, **kwargs):
+        return ("Report.\n\n## Recommended Adjustments\n**None** — holds up.",
+                ["https://example.com/source"])
+
+    monkeypatch.setattr(research_mod, "call_anthropic_web_search", _no_adjustments_search)
+
+    config = {"configurable": {"thread_id": "t-stale-apply"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
+    card = result["pending_decision"]
+    assert card["id"] == "approve-doc:market_research"
+    # Decorated "None" correctly means: no apply buttons on a fresh card
+    assert not any(o["id"] == "apply" for o in card["options"])
+
+    # Even if a stale card lets "apply" through, it approves instead of rewriting
+    result = await _decide(result, config, action="choose", chosen_option="apply")
+    assert "market_research" in result["approved_docs"]
+    assert result["market_research"].get("revised") is not True
+    assert _pending_id(result) == "approve-doc:competitor_analysis"
+
+
+async def test_turkish_rewrite_request_revises_not_approves(mock_llms):
+    """'Tekrar yazar mısın bu dökümanı' revises deterministically — the LLM
+    intent parser is bypassed, so a weak model can't misread it as approval."""
+    config = {"configurable": {"thread_id": "t-rewrite-tr"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
+    assert _pending_id(result) == "approve-doc:market_research"
+
+    state2 = dict(result)
+    messages = list(state2["messages"])
+    messages.append({"id": "rw", "role": "user",
+                     "content": "Tekrar yazar mısın bu dökümanı?", "timestamp": ""})
+    state2.update(messages=messages, pipeline_status="running", pending_decision=None)
+
+    result2 = await pipeline.ainvoke(state2, config=config)
+
+    assert result2["market_research"].get("revised") is True
+    assert "market_research" not in (result2.get("approved_docs") or [])
+    assert _pending_id(result2) == "approve-doc:market_research"
+
+
+async def test_go_back_reopens_step_without_rewriting(mock_llms):
+    """'Devils advocate adımına geri dönelim' reopens the gate, doc untouched."""
+    config = {"configurable": {"thread_id": "t-reopen-da"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
+    for _ in range(3):
+        result = await _approve(result, config)
+    result = await _approve(result, config)  # approve-research
+    for _ in range(5):
+        result = await _approve(result, config)
+    result = await _approve(result, config)  # approve-spec
+    result = await _approve(result, config)  # DA report approved
+    assert _pending_id(result) == "approve-doc:consistency_report"
+    da_before = result["devils_advocate"]
+
+    state2 = dict(result)
+    messages = list(state2["messages"])
+    messages.append({"id": "gb", "role": "user",
+                     "content": "devils advocate adımına geri dönelim.",
+                     "timestamp": ""})
+    state2.update(messages=messages, pipeline_status="running", pending_decision=None)
+
+    result2 = await pipeline.ainvoke(state2, config=config)
+
+    # Gate reopened, document NOT rewritten, approval revoked
+    assert _pending_id(result2) == "approve-doc:devils_advocate"
+    assert result2["devils_advocate"] == da_before
+    assert "devils_advocate" not in (result2.get("approved_docs") or [])
+
+
+async def test_rerun_step_request_revises_and_shows_result(mock_llms):
+    """'Adımı baştan çalıştıralım ve oradan devam edelim' re-runs the gated
+    report and RE-PRESENTS it — it must not be auto-approved past the user."""
+    config = {"configurable": {"thread_id": "t-rerun-da"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
+    for _ in range(3):
+        result = await _approve(result, config)
+    result = await _approve(result, config)  # approve-research
+    for _ in range(5):
+        result = await _approve(result, config)
+    result = await _approve(result, config)  # approve-spec
+    assert _pending_id(result) == "approve-doc:devils_advocate"
+
+    state2 = dict(result)
+    messages = list(state2["messages"])
+    messages.append({"id": "rr", "role": "user",
+                     "content": "Devil adımını baştan çalıştıralım ve oradan devam edelim",
+                     "timestamp": ""})
+    state2.update(messages=messages, pipeline_status="running", pending_decision=None)
+
+    result2 = await pipeline.ainvoke(state2, config=config)
+
+    # Report re-generated, NOT silently approved — the gate comes back
+    assert "devils_advocate" not in (result2.get("approved_docs") or [])
+    assert _pending_id(result2) == "approve-doc:devils_advocate"
+
+
+async def test_freeform_approval_intent_approves_instead_of_revising(
+    mock_llms, monkeypatch
+):
+    """'Noted, let's continue' typed on the card approves the doc — no rewrite."""
+    config = {"configurable": {"thread_id": "t-approve-intent"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
+    assert _pending_id(result) == "approve-doc:market_research"
+
+    async def _approve_llm(messages, **kwargs):
+        if "TAKE ACTION" in messages[0]["content"]:
+            return '```json\n{"action": "approve", "target": "market_research"}\n```'
+        return "Mocked LLM response."
+
+    monkeypatch.setattr(research_mod, "call_llm", _approve_llm)
+
+    result = await _decide(
+        result, config, action="custom",
+        custom_input="Önerileri sonrası için kaydedelim, ilerleyelim.",
+    )
+
+    assert "market_research" in result["approved_docs"]
+    assert result["market_research"].get("revised") is not True  # untouched
+    # Pipeline moved on to the next research document
+    assert _pending_id(result) == "approve-doc:competitor_analysis"
 
 
 async def test_full_pipeline_with_quality_improvement_loop(mock_llms):
@@ -216,8 +384,16 @@ async def test_full_pipeline_with_quality_improvement_loop(mock_llms):
     assert _pending_id(result) == "approve-spec"
     result = await _approve(result, config)
 
-    # Quality: first score is low, card recommends improving and the chat
-    # note lists the highest-impact fixes
+    # Quality: adversarial + consistency reports come first, each gated —
+    # the reviewer scores LAST, with those findings in view
+    assert _pending_id(result) == "approve-doc:devils_advocate"
+    assert result.get("quality_score") is None  # reviewer hasn't run yet
+    result = await _approve(result, config)
+    assert _pending_id(result) == "approve-doc:consistency_report"
+    result = await _approve(result, config)
+
+    # First score is low, card recommends improving and the chat note lists
+    # the highest-impact fixes
     assert result["quality_score"] == 62
     assert _pending_id(result) == "approve-quality"
     assert result["pending_decision"]["agent_recommendation"] == "improve"
@@ -228,6 +404,10 @@ async def test_full_pipeline_with_quality_improvement_loop(mock_llms):
     ]
     assert "To raise the score" in result["messages"][-1]["content"]
     assert "Add real TAM data" in result["messages"][-1]["content"]
+    # Scores are stamped with the rubric version (code-side, not model-side)
+    from app.agents.quality import RUBRIC_VERSION
+    assert result["quality_breakdown"]["rubric_version"] == RUBRIC_VERSION
+    assert f"rubric version `{RUBRIC_VERSION}`" in result["quality_feedback"]
 
     # Improvement pass only touches the docs named in the fixes, then
     # re-scores → high score, card recommends packaging
@@ -249,6 +429,8 @@ async def test_full_pipeline_with_quality_improvement_loop(mock_llms):
     assert result["current_phase"] == "completed"
     files = result["project_files"]
     assert "INDEX.md" in files
+    assert "00_IDEA/idea_brief.md" in files
+    assert "One marketplace for everything marine" in files["00_IDEA/idea_brief.md"]
     assert "01_RESEARCH/market_research.md" in files
     assert result["pending_decision"] is None
 
@@ -287,6 +469,8 @@ async def test_chat_request_at_quality_gate_triggers_targeted_improvement(
     for _ in range(5):
         result = await _approve(result, config)
     result = await _approve(result, config)  # approve-spec
+    result = await _approve(result, config)  # devils_advocate report
+    result = await _approve(result, config)  # consistency report
     assert _pending_id(result) == "approve-quality"
 
     # Discussion agent responds with an action instead of advice
@@ -314,6 +498,79 @@ async def test_chat_request_at_quality_gate_triggers_targeted_improvement(
     assert "System Architecture" not in improve_note  # only the requested target
     assert result2["quality_score"] == 84  # re-scored after the pass
     assert _pending_id(result2) == "approve-quality"
+
+
+def test_brief_extraction_tolerates_model_formatting():
+    """Brief JSON parses across fence/spacing variants free models produce."""
+    from app.agents.idea_analyst import _extract_brief
+
+    brief = {"problem_statement": "x", "core_features": ["a"]}
+    payload_spaced = '{"action": "present_brief", "brief": {"problem_statement": "x", "core_features": ["a"]}}'
+    payload_tight = '{"action":"present_brief","brief":{"problem_statement":"x","core_features":["a"]}}'
+
+    # Canonical form
+    assert _extract_brief(f"Here it is:\n```json\n{payload_spaced}\n```") == brief
+    # No space after colons (common in compact model output)
+    assert _extract_brief(f"```json\n{payload_tight}\n```") == brief
+    # Fence without a language tag / uppercase tag
+    assert _extract_brief(f"```\n{payload_spaced}\n```") == brief
+    assert _extract_brief(f"```JSON\n{payload_spaced}\n```") == brief
+    # No fence at all
+    assert _extract_brief(f"Final brief below.\n{payload_tight}") == brief
+    # Not a brief
+    assert _extract_brief("just chatting about present_brief plans") is None
+    assert _extract_brief("no marker here") is None
+
+
+def test_adjustments_parser_tolerates_model_formatting():
+    """Heading variants parse; absence or 'None' means no adjustments."""
+    from app.agents.common import extract_adjustments
+
+    # Models write the heading in many ways — all must parse
+    assert extract_adjustments("intro\n## Recommended Adjustments\n1. x") == "1. x"
+    assert extract_adjustments("intro\n### recommended adjustments\n1. x") == "1. x"
+    assert extract_adjustments("intro\n**Recommended Adjustments:**\n1. x") == "1. x"
+    # "None" and absence both mean no adjustments (no buttons, no forcing)
+    assert extract_adjustments("## Recommended Adjustments\nNone — fine.") is None
+    assert extract_adjustments("no section at all") is None
+    # Decorated "None" variants (bold/list markers render invisibly in the UI)
+    assert extract_adjustments("## Recommended Adjustments\n**None** — holds up.") is None
+    assert extract_adjustments("## Recommended Adjustments\n- None — fine.") is None
+    assert extract_adjustments("## Recommended Adjustments\n1. None.") is None
+    assert extract_adjustments("## Recommended Adjustments\n*None — ok.*") is None
+    # Section ends at the next heading
+    assert extract_adjustments(
+        "## Recommended Adjustments\n1. x\n## Sources\n- y"
+    ) == "1. x"
+    # Numbered heading (models mirror the numbered doc structure)
+    assert extract_adjustments("## 6. Recommended Adjustments\n1. x") == "1. x"
+    assert extract_adjustments("**5) Recommended Adjustments**\n1. x") == "1. x"
+    # Turkish output (whole doc translated by free models)
+    assert extract_adjustments("## Önerilen Ayarlamalar\n1. x") == "1. x"
+    assert extract_adjustments("### Tavsiye Edilen Değişiklikler\n1. x") == "1. x"
+    assert extract_adjustments("## Önerilen Ayarlamalar\nYok — mevcut yön uygun.") is None
+
+
+def test_context_strips_adjustments_and_blocklists_them():
+    """Earlier docs' suggestions don't leak into downstream agents as context,
+    and are passed as an explicit do-not-repeat blocklist."""
+    from app.agents.common import (
+        docs_context,
+        prior_adjustments_blocklist,
+        strip_adjustments_section,
+    )
+
+    doc = "# Report\n\nBody.\n\n## Recommended Adjustments\n1. Focus Turkey.\n\n## Sources\n- y"
+    stripped = strip_adjustments_section(doc)
+    assert "Focus Turkey" not in stripped
+    assert "## Sources" in stripped  # rest of the document survives
+
+    state = {"market_research": {"report": doc, "completed": True}}
+    assert "Focus Turkey" not in docs_context(state, ["market_research"])
+
+    block = prior_adjustments_blocklist(state)
+    assert "BLOCKLIST" in block and "Focus Turkey" in block
+    assert prior_adjustments_blocklist({}) == ""
 
 
 async def test_no_anthropic_key_falls_back_to_plain_llm(mock_llms, monkeypatch):

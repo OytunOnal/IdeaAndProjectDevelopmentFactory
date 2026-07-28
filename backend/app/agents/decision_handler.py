@@ -2,6 +2,7 @@
 
 import logging
 
+from app.agents.common import extract_adjustments, get_doc
 from app.agents.state import ProjectState
 
 logger = logging.getLogger(__name__)
@@ -172,12 +173,69 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                 "pipeline_status": "running",
             }
 
-        if chosen == "apply":
-            # Integrate all numbered recommendations into the document
+        if chosen in ("apply", "apply_review"):
+            # Stale card safety: if the document carries no real adjustments
+            # (e.g. "None — ..."), there is nothing to apply — approve instead
+            # of forcing the model into a pointless rewrite.
+            if not extract_adjustments(get_doc(state, doc_key) or ""):
+                approved = list(state.get("approved_docs") or [])
+                if doc_key not in approved:
+                    approved.append(doc_key)
+                messages.append({
+                    "id": f"msg-agent-{len(messages)}",
+                    "role": "agent",
+                    "agent_id": "orchestrator",
+                    "content": "This document has no pending adjustments to apply — approved as-is, moving on.",
+                    "timestamp": "",
+                })
+                return {
+                    **state,
+                    "approved_docs": approved,
+                    "decisions": decisions,
+                    "messages": messages,
+                    "pending_decision": None,
+                    "pipeline_status": "running",
+                }
+
+            # Quality reports: their recommendations target the SPEC documents,
+            # not the report itself — run an improvement pass instead of a
+            # report rewrite, and approve the report.
+            if doc_key in ("devils_advocate", "consistency_report"):
+                titles = {
+                    "devils_advocate": "Devil's Advocate report",
+                    "consistency_report": "Consistency report",
+                }
+                approved = list(state.get("approved_docs") or [])
+                if doc_key not in approved:
+                    approved.append(doc_key)
+                messages.append({
+                    "id": f"msg-user-{len(messages)}",
+                    "role": "user",
+                    "content": f"Apply the {titles[doc_key]}'s recommendations to the specs.",
+                    "timestamp": "",
+                })
+                return {
+                    **state,
+                    "approved_docs": approved,
+                    "quality_improve_requested": True,
+                    "quality_improve_focus": (
+                        f"Apply the recommended adjustments/mitigations from the "
+                        f"{titles[doc_key]} to the affected documents."
+                    ),
+                    "decisions": decisions,
+                    "messages": messages,
+                    "pending_decision": None,
+                    "pipeline_status": "running",
+                }
+
+            # Integrate all numbered recommendations into the document.
+            # "apply" continues without another review round; "apply_review"
+            # re-presents the gate with the revised document.
             messages.append({
                 "id": f"msg-user-{len(messages)}",
                 "role": "user",
-                "content": "Apply the recommended adjustments.",
+                "content": "Apply the recommended adjustments"
+                + (" and continue." if chosen == "apply" else ", then let me review."),
                 "timestamp": "",
             })
             return {
@@ -188,6 +246,8 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                     "'Recommended Adjustments' section: integrate them fully into "
                     "the project direction and rewrite the document accordingly."
                 ),
+                "revision_is_apply": True,
+                "revision_then": "continue" if chosen == "apply" else "review",
                 "decisions": decisions,
                 "messages": messages,
                 "pending_decision": None,
@@ -195,8 +255,10 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
             }
 
         if submission.get("custom_input"):
-            # Freeform text on the card = the change request itself
-            # (e.g. "apply 1 and 3", or any other change description)
+            # Freeform text on the card goes to the discussion agent, which
+            # decides the intent: revise, approve-and-continue, or answer a
+            # question. (Blindly treating it as a change request caused
+            # "noted, let's continue" to trigger a full rewrite.)
             messages.append({
                 "id": f"msg-user-{len(messages)}",
                 "role": "user",
@@ -205,8 +267,6 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
             })
             return {
                 **state,
-                "revision_target": doc_key,
-                "revision_feedback": submission["custom_input"],
                 "decisions": decisions,
                 "messages": messages,
                 "pending_decision": None,

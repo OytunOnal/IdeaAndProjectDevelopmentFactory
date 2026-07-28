@@ -13,6 +13,8 @@ from app.agents.common import (
     DOC_TITLES,
     agent_message,
     brief_context,
+    consume_adjustments,
+    current_gate_card,
     doc_gate_card,
     docs_context,
     emit_progress,
@@ -20,16 +22,35 @@ from app.agents.common import (
     get_doc,
 )
 from app.agents.llm import call_llm
+from app.agents.quality import CONSISTENCY_PROMPT, DEVILS_ADVOCATE_PROMPT
 from app.agents.research import _AGENTS as RESEARCH_AGENTS
 from app.agents.specification import SPEC_AGENTS
 from app.agents.state import ProjectState
 
 logger = logging.getLogger(__name__)
 
+# Quality reports are revisable documents too ("Request changes" on their gates)
+_QUALITY_REPORTS = {
+    "devils_advocate": {
+        "prompt": DEVILS_ADVOCATE_PROMPT,
+        "output_key": "devils_advocate",
+        "title": "Devil's Advocate Report",
+        "emoji": "😈",
+        "tier": 2,
+    },
+    "consistency_report": {
+        "prompt": CONSISTENCY_PROMPT,
+        "output_key": "consistency_report",
+        "title": "Consistency Report",
+        "emoji": "🧩",
+        "tier": 2,
+    },
+}
+
 
 def _find_agent(key: str) -> dict | None:
     """Locate the producing agent's spec (prompt/title/emoji) by output key."""
-    for agents in (RESEARCH_AGENTS, SPEC_AGENTS):
+    for agents in (RESEARCH_AGENTS, SPEC_AGENTS, _QUALITY_REPORTS):
         for spec in agents.values():
             if spec["output_key"] == key:
                 return spec
@@ -37,23 +58,18 @@ def _find_agent(key: str) -> dict | None:
 
 
 async def doc_gate_node(state: ProjectState) -> ProjectState:
-    """Present the approval card for the first unapproved document."""
-    approved = state.get("approved_docs") or []
-    for key in (
-        "market_research", "competitor_analysis", "tech_feasibility",
-        "prd", "architecture", "ux_design", "gtm_strategy", "financial_model",
-    ):
-        doc = get_doc(state, key)
-        if doc and key not in approved:
-            return {
-                **state,
-                "current_agent": "orchestrator",
-                "pipeline_status": "running",
-                "pending_decision": doc_gate_card(key, bool(extract_adjustments(doc))),
-            }
+    """Present the approval card for the document currently awaiting review."""
+    card = current_gate_card(state)
+    if card:
+        return {
+            **state,
+            "current_agent": "orchestrator",
+            "pipeline_status": "running",
+            "pending_decision": card,
+        }
 
-    # Nothing to gate (shouldn't happen) — just continue
-    return state
+    # No gate to present (defensive) — pause rather than loop the router
+    return {**state, "pipeline_status": "waiting_for_user"}
 
 
 async def revise_document_node(state: ProjectState) -> ProjectState:
@@ -117,6 +133,11 @@ async def revise_document_node(state: ProjectState) -> ProjectState:
             "pipeline_status": "waiting_for_user",
         }
 
+    # Applied adjustments are consumed — otherwise the mandatory-section rule
+    # makes the model re-propose the same items and the gate loops forever.
+    if state.get("revision_is_apply"):
+        document = consume_adjustments(document)
+
     # Research docs are dicts; keep their structure, mark as no longer grounded-checked
     old_value = state.get(key)
     if isinstance(old_value, dict):
@@ -130,21 +151,44 @@ async def revise_document_node(state: ProjectState) -> ProjectState:
     if state.get("current_phase") == "quality":
         quality_reset = {"quality_feedback": None, "quality_review_done": False}
 
-    return {
+    base = {
         **state,
         **quality_reset,
         key: new_value,
         "revision_target": None,
         "revision_feedback": None,
+        "revision_is_apply": False,
+        "revision_then": None,
+        "current_agent": "orchestrator",
+        "pipeline_status": "running",
+        "total_llm_calls": state.get("total_llm_calls", 0) + 1,
+    }
+
+    # "Apply & continue": approve the revised document and keep moving —
+    # no extra review round.
+    if state.get("revision_then") == "continue":
+        approved = list(state.get("approved_docs") or [])
+        if key not in approved:
+            approved.append(key)
+        return {
+            **base,
+            "approved_docs": approved,
+            "messages": agent_message(
+                state, "orchestrator",
+                f"✏️ **{title} revised and approved** — adjustments applied "
+                f"(`{DOC_PATHS.get(key, key)}`). Moving on.",
+            ),
+            "pending_decision": None,
+        }
+
+    return {
+        **base,
         "messages": agent_message(
             state, "orchestrator",
             f"✏️ **{title} revised** — updated in the files panel "
             f"(`{DOC_PATHS.get(key, key)}`). Take another look.",
         ),
-        "current_agent": "orchestrator",
-        "pipeline_status": "running",
         "pending_decision": doc_gate_card(key, bool(extract_adjustments(document))),
-        "total_llm_calls": state.get("total_llm_calls", 0) + 1,
     }
 
 
@@ -161,6 +205,20 @@ async def spec_improver_node(state: ProjectState) -> ProjectState:
             "HIGHEST-IMPACT FIXES (address these first):\n"
             + "\n".join(f"- {f}" for f in top_fixes)
             + "\n\n" + gaps
+        )
+    # The Devil's Advocate mitigations and consistency findings are part of
+    # the improvement input too — they used to be produced and then ignored.
+    devils = get_doc(state, "devils_advocate")
+    if devils:
+        gaps += (
+            "\n\nDEVIL'S ADVOCATE — RISKS & MITIGATIONS (address the "
+            "mitigations relevant to your document):\n" + devils[:2500]
+        )
+    consistency = get_doc(state, "consistency_report")
+    if consistency:
+        gaps += (
+            "\n\nCONSISTENCY FINDINGS (fix the mismatches that involve your "
+            "document):\n" + consistency[:2000]
         )
     focus = state.get("quality_improve_focus")
     if focus:
@@ -196,10 +254,14 @@ async def spec_improver_node(state: ProjectState) -> ProjectState:
         )
         user_content = (
             f"{context}\n\n---\n\n{research}\n\n---\n\n"
-            f"YOUR PREVIOUS VERSION:\n\n{previous[:10000]}\n\n---\n\n"
+            f"YOUR PREVIOUS VERSION:\n\n{previous[:14000]}\n\n---\n\n"
             f"QUALITY REVIEW FINDINGS (address every gap relevant to this document):\n"
             f"{gaps[:4000]}\n\n"
-            f"Rewrite the {title}, fixing the relevant gaps. Keep what was good."
+            f"IMPORTANT: this is a TARGETED improvement, not a from-scratch "
+            f"rewrite. Preserve every existing section and all of its detail — "
+            f"only fix and add what the findings require. The improved document "
+            f"must not be shorter than the previous version. "
+            f"Improve the {title} now."
         )
 
         try:
@@ -211,8 +273,18 @@ async def spec_improver_node(state: ProjectState) -> ProjectState:
                 model_tier=spec.get("tier", 2),
                 api_key=state.get("api_key"),
                 temperature=0.4,
-                max_tokens=6144,
+                max_tokens=8192,
             )
+            # Regression guard: a rewrite that lost a big chunk of the document
+            # (truncated output, dropped sections) must not replace the original —
+            # that's how a 94-score package degraded to 65.
+            if len(document) < 0.6 * len(previous):
+                logger.warning(
+                    f"Improvement of {key} rejected: output {len(document)} chars "
+                    f"vs previous {len(previous)} — looks truncated"
+                )
+                improved.append(f"{title} (skipped — output looked truncated)")
+                continue
             state = {**state, key: document}
             improved.append(title)
         except Exception as e:

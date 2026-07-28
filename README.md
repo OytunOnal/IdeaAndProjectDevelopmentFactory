@@ -33,9 +33,15 @@ set, stress-tests it, and hands you a ZIP:
             📦 Packaging              implementation roadmap + 13-document ZIP
 ```
 
-Every phase ends in a **decision card** — the pipeline never runs away from you.
+Every document — not just every phase — stops at a **decision card**: approve
+as-is, apply the document's own recommended adjustments (and either continue or
+review the result), or just tell the chat what to change in plain language.
+The chat understands intent — "rewrite this", "go back to the devil's advocate
+step", "apply 1 and 3 and continue" — with deterministic shortcuts for the
+unambiguous cases so a weak model can never misread "rewrite" as approval.
 While agents work, progress streams to the UI over WebSocket, documents appear
-in the file tree as they are written, and everything survives a server restart.
+in the file tree as they are written (chat stays a thin control channel), and
+everything survives a server restart.
 
 ## The agents
 
@@ -50,9 +56,9 @@ in the file tree as they are written, and everything survives a server restart.
 | Specification | `ux_strategist` | User flows, screen specs, design system |
 | Specification | `gtm_strategist` | Launch plan, channels, first-1000-users plan |
 | Specification | `financial_modeler` | Pricing, projections, unit economics |
-| Quality | `quality_reviewer` | 100-point rubric score with structured JSON verdict |
-| Quality | `devils_advocate` | Adversarial critique, ranked unvalidated assumptions |
-| Quality | `consistency_checker` | Cross-document contradiction report |
+| Quality | `devils_advocate` | Adversarial critique with one-click-applicable mitigations |
+| Quality | `consistency_checker` | Cross-document contradiction report, fixes applicable to specs |
+| Quality | `quality_reviewer` | Runs **last**, with the adversarial findings in view: 100-point rubric score, rubric-versioned, every deduction backed by a quoted span |
 | Packaging | `planning_agent` | Phased roadmap + sprint plan |
 | Packaging | `doc_formatter` | Final 13-file document set (deterministic, no LLM) |
 
@@ -70,9 +76,26 @@ This project demonstrates, in working code:
 - **Agent orchestration with LangGraph** — a 25-node `StateGraph` with an
   orchestrator-router, conditional edges, and per-project checkpointing
   ([graph.py](backend/app/agents/graph.py), [orchestrator.py](backend/app/agents/orchestrator.py))
-- **Human-in-the-loop design** — typed decision cards, phase gates,
+- **Human-in-the-loop design** — per-document approval gates with revision
+  loops, "apply & continue" vs "apply & review" semantics, reopenable steps,
   configurable autonomy (`ask` / `suggest` / `delegate` per decision category)
   ([decision_handler.py](backend/app/agents/decision_handler.py))
+- **Intent routing with deterministic guardrails** — free-text chat maps to
+  typed actions (revise / approve / reopen / improve); unambiguous requests
+  ("rewrite this", "go back to X") bypass LLM intent parsing entirely, so
+  misclassification can't silently approve or discard user intent
+  ([common.py](backend/app/agents/common.py))
+- **Auditable LLM-as-judge** — the quality score is rubric-versioned (stamped
+  in code, so a rubric edit can't silently re-rate old packages) and every
+  deduction must cite the rubric line plus a quoted span from the document
+  ([quality.py](backend/app/agents/quality.py))
+- **Self-consuming recommendation lifecycle** — documents end with numbered
+  adjustment proposals; applying them consumes the section (no infinite
+  improvement loops), earlier proposals are blocklisted downstream (no
+  parroting), and fabricated evidence is banned by prompt contract
+- **Regression guards on rewrites** — an "improvement" that loses >40% of a
+  document is rejected rather than applied; per-project asyncio locks make
+  pipeline runs atomic against double-submitted decisions
 - **Tool use / grounding** — research agents call Claude's server-side
   `web_search` tool and return cited, current data
   ([research.py](backend/app/agents/research.py))
@@ -147,7 +170,8 @@ Everything except research runs on free-tier providers either way.
 ## Testing
 
 ```bash
-make test-backend    # 9 tests: full pipeline flow with mocked LLMs, persistence
+make test-backend    # 20 tests: full pipeline flow with mocked LLMs, gates,
+                     # revisions, intent shortcuts, quality loop, persistence
 make lint-backend    # ruff
 cd frontend && npm run lint && npx tsc --noEmit
 ```

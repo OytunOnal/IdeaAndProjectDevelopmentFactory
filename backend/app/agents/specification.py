@@ -15,11 +15,15 @@ from app.agents.common import (
     apply_discussion_action,
     brief_context,
     current_gate_card,
+    current_gate_key,
     docs_context,
     emit_progress,
     extract_adjustments,
     get_doc,
     parse_action,
+    prior_adjustments_blocklist,
+    reopen_request_shortcut,
+    rewrite_request_shortcut,
 )
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
@@ -147,6 +151,7 @@ async def _run_spec_agent(state: ProjectState, agent_id: str) -> ProjectState:
     user_content = (
         f"{context}\n\n---\n\n{docs}\n\n---\n\n"
         f"Write the {spec['title']} for this project now."
+        + prior_adjustments_blocklist(state)
     )
 
     try:
@@ -268,8 +273,11 @@ async def spec_review_node(state: ProjectState) -> ProjectState:
 
     return {
         **state,
+        "spec_summary": summary,
         "messages": agent_message(
-            state, "orchestrator", f"🧭 **Specification Summary**\n\n{summary}"
+            state, "orchestrator",
+            "🧭 **Specification phase complete** — executive summary opened in "
+            f"the files panel (`{DOC_PATHS['spec_summary']}`).",
         ),
         "current_agent": "orchestrator",
         "pipeline_status": "running",
@@ -283,6 +291,11 @@ async def spec_review_node(state: ProjectState) -> ProjectState:
 
 async def review_discussion_node(state: ProjectState) -> ProjectState:
     """Answer user questions about the produced documents (spec/quality/completed)."""
+    # Clear navigation/rewrite requests → handled deterministically,
+    # skipping LLM intent parsing
+    shortcut = reopen_request_shortcut(state) or rewrite_request_shortcut(state)
+    if shortcut:
+        return shortcut
     doc_keys = [
         "market_research", "competitor_analysis", "tech_feasibility",
         "prd", "architecture", "ux_design", "gtm_strategy", "financial_model",
@@ -290,12 +303,19 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
         "implementation_roadmap",
     ]
     grounding = docs_context(state, doc_keys, max_chars=1500)
+    gate_key = current_gate_key(state)
+    gate_note = (
+        f"\n\nDocument currently awaiting the user's approval: {gate_key}"
+        if gate_key
+        else ""
+    )
     system = (
         "You are the Orchestrator of ProjectFactory. Answer the user's questions "
         "concisely, grounded in the project documents below. Be constructive: "
         "when the user raises a concern, propose how the project could adapt "
         "rather than defending the documents."
         + ACTION_CAPABILITY
+        + gate_note
         + "\n\n" + grounding
     )
 

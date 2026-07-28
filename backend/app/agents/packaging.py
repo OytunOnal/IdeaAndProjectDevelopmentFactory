@@ -3,10 +3,12 @@
 import logging
 
 from app.agents.common import (
+    DOC_PATHS,
     DOC_TITLES,
     agent_message,
     docs_context,
     emit_progress,
+    format_brief,
     get_doc,
 )
 from app.agents.llm import call_llm
@@ -75,6 +77,8 @@ FILE_MAP = {
     "01_RESEARCH/market_research.md": "market_research",
     "01_RESEARCH/competitor_analysis.md": "competitor_analysis",
     "01_RESEARCH/tech_feasibility.md": "tech_feasibility",
+    "01_RESEARCH/research_summary.md": "research_summary",
+    "05_PLANNING/specification_summary.md": "spec_summary",
     "02_PRODUCT/prd.md": "prd",
     "03_DESIGN/ux_specification.md": "ux_design",
     "04_TECH/architecture.md": "architecture",
@@ -85,6 +89,19 @@ FILE_MAP = {
     "06_QUALITY/devils_advocate.md": "devils_advocate",
     "06_QUALITY/consistency_report.md": "consistency_report",
 }
+
+
+def _render_brief(state: ProjectState) -> str | None:
+    """Render the structured idea brief as a document, once it exists."""
+    brief = state.get("idea_brief")
+    if not brief:
+        return None
+    status = "confirmed" if brief.get("confirmed") else "draft — awaiting confirmation"
+    return (
+        f"# {DOC_TITLES['idea_brief']}\n\n"
+        f"> {state.get('project_name', 'Project')} · {status}\n\n"
+        f"{format_brief(brief)}\n"
+    )
 
 
 def _render_doc(state: ProjectState, key: str) -> str | None:
@@ -109,6 +126,9 @@ def draft_files(state: ProjectState) -> dict[str, str]:
     if state.get("project_files"):
         return state["project_files"]
     files: dict[str, str] = {}
+    brief = _render_brief(state)
+    if brief:
+        files[DOC_PATHS["idea_brief"]] = brief
     for path, key in FILE_MAP.items():
         content = _render_doc(state, key)
         if content:
@@ -121,6 +141,9 @@ async def doc_formatter_node(state: ProjectState) -> ProjectState:
     await emit_progress(state, "doc_formatter", "📦 Assembling the final document set...")
 
     files: dict[str, str] = {}
+    brief = _render_brief(state)
+    if brief:
+        files[DOC_PATHS["idea_brief"]] = brief
     for path, key in FILE_MAP.items():
         content = _render_doc(state, key)
         if content:

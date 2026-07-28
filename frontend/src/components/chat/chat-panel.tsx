@@ -185,6 +185,7 @@ export function ChatPanel({
           <DecisionCard
             decision={pendingDecision as Parameters<typeof DecisionCard>[0]["decision"]}
             onSubmit={submitDecision}
+            disabled={loading}
           />
         )}
 

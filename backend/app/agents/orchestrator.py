@@ -76,16 +76,22 @@ def route_orchestrator(state: ProjectState) -> str:
             return "spec_review"
         return _discussion_or_end(state)
 
-    # QUALITY phase: score, stress-test, cross-check, then review
+    # QUALITY phase: stress-test and cross-check first (each user-gated),
+    # then the reviewer scores with those findings in view.
     if phase == "quality":
         if state.get("quality_improve_requested"):
             return "spec_improver"
-        if not state.get("quality_feedback"):
-            return "quality_reviewer"
+        approved = state.get("approved_docs") or []
         if not state.get("devils_advocate"):
             return "devils_advocate"
+        if "devils_advocate" not in approved:
+            return _gate_or_discussion(state, "review_discussion")
         if not state.get("consistency_report"):
             return "consistency_checker"
+        if "consistency_report" not in approved:
+            return _gate_or_discussion(state, "review_discussion")
+        if not state.get("quality_feedback"):
+            return "quality_reviewer"
         if not state.get("quality_review_done"):
             return "quality_review"
         return _discussion_or_end(state)

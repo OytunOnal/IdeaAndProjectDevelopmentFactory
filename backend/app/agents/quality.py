@@ -23,7 +23,15 @@ ALL_SPEC_DOCS = [
 ]
 
 
+# Version of the scoring rubric below. Bump whenever the rubric lines or
+# weights change — every stored score is stamped with this, so past scores
+# stay attributable to the rubric that produced them instead of being
+# silently re-interpreted after an edit.
+RUBRIC_VERSION = "2026-07-28.1"
+
 QUALITY_REVIEWER_PROMPT = """You are the Quality Reviewer of ProjectFactory — the independent gatekeeper. Your job is to find problems, not to approve. You did NOT write these documents.
+
+You are also given the Devil's Advocate and Consistency reports — risks left unmitigated and inconsistencies left unfixed MUST be reflected in your scores.
 
 Score the project specifications against this rubric (100 points):
 
@@ -33,7 +41,13 @@ Score the project specifications against this rubric (100 points):
 4. **Technical (30)** — architecture soundness (12), database/API design (10), risk mitigation (8)
 
 Output in markdown:
-- Score per category with 1-2 sentence justification
+- Score per category. For EACH category you must make the score auditable:
+  quote the exact rubric line you are applying, then cite the evidence — the
+  document key plus the shortest quoted span (max ~25 words) that earned or
+  lost the points. Format:
+  `- rubric: "<rubric line>" | evidence: <doc_key>: "<quoted span>" | <points awarded> — <one-line reason>`
+  A deduction without a cited span does not count; if you cannot point to a
+  span, do not deduct for it.
 - Specific gaps with severity (critical/major/minor) and a concrete fix for each
 - Verdict paragraph
 
@@ -60,7 +74,13 @@ Challenge, in markdown:
 
 Every risk you raise MUST come with at least one concrete mitigation or pivot — never leave the user with "this won't work" and no path forward.
 
-End with: recommended actions for the top 3 risks, and an overall risk rating line `RISK: LOW | MEDIUM | HIGH | CRITICAL`. Max ~700 words, specific counter-arguments only — no generic caution."""
+End with an overall risk rating line `RISK: LOW | MEDIUM | HIGH | CRITICAL`, then finish with exactly this heading:
+
+## Recommended Adjustments
+
+Up to 3 NUMBERED project-level changes that would defuse the biggest risks — the user can apply these to the specs with one click, so make them concrete and self-contained. High bar, no filler. If the risks are already adequately mitigated, write exactly: None — the current direction holds up.
+
+Max ~700 words, specific counter-arguments only — no generic caution."""
 
 
 CONSISTENCY_PROMPT = """You are the Consistency Checker of ProjectFactory. Validate that the project documents are internally consistent.
@@ -72,12 +92,23 @@ Check and report in markdown:
 3. **Numbers** — market sizes, prices, timelines, and costs don't contradict between documents.
 4. **Scope** — MVP scope is identical in PRD, architecture, and financial assumptions.
 
-Output: a table of inconsistencies (location, severity critical/major/minor, suggested fix). If a category is clean, say so in one line. Max ~500 words."""
+Output: a table of inconsistencies (location, severity critical/major/minor, suggested fix). If a category is clean, say so in one line. Max ~500 words.
+
+Finish with exactly this heading:
+
+## Recommended Adjustments
+
+Up to 3 NUMBERED cross-document alignment fixes worth applying to the specs (the user can apply them with one click). If the documents are consistent, write exactly: None — the documents are consistent."""
 
 
 async def quality_reviewer_node(state: ProjectState) -> ProjectState:
     await emit_progress(state, "quality_reviewer", "🔍 Scoring the specifications against the quality rubric...")
-    docs = docs_context(state, ALL_SPEC_DOCS, max_chars=6000)
+    # The reviewer runs LAST in the phase, with the adversarial and
+    # consistency findings in view — the score reflects them.
+    docs = docs_context(
+        state, [*ALL_SPEC_DOCS, "devils_advocate", "consistency_report"],
+        max_chars=6000,
+    )
 
     try:
         response = await call_llm(
@@ -108,10 +139,16 @@ async def quality_reviewer_node(state: ProjectState) -> ProjectState:
     if score is not None:
         history.append(score)
 
+    # Stamp the rubric version on the stored score and the report itself,
+    # so a later rubric edit can't silently re-rate already-scored packages.
+    # Stamped in code, not requested from the model — the model can't forget it.
+    breakdown = {**(breakdown or {}), "rubric_version": RUBRIC_VERSION}
+    feedback += f"\n\n---\n\n*Scored against rubric version `{RUBRIC_VERSION}`.*"
+
     return {
         **state,
         "quality_score": score,
-        "quality_breakdown": breakdown or {},
+        "quality_breakdown": breakdown,
         "quality_top_fixes": top_fixes,
         "quality_score_history": history,
         "quality_feedback": feedback,
@@ -205,6 +242,10 @@ async def quality_review_node(state: ProjectState) -> ProjectState:
             chat_note += (
                 "\n\nOptional — these would raise the score further:\n" + fixes_list
             )
+        chat_note += (
+            "\n\nChoosing *Improve the specs* also applies the Devil's Advocate "
+            "mitigations and consistency fixes."
+        )
         reasoning = "The specs meet the 80-point quality bar."
         recommendation = "confirm"
     else:
@@ -215,13 +256,15 @@ async def quality_review_node(state: ProjectState) -> ProjectState:
             chat_note += (
                 "\n\n**To raise the score, these are the highest-impact fixes:**\n"
                 + fixes_list
-                + "\n\nApply them all, add your own priority in the text box, or "
-                "package anyway. Full gap analysis: `06_QUALITY/quality_review.md`."
+                + "\n\n*Improve the specs* applies these plus the Devil's Advocate "
+                "mitigations and consistency fixes; or type your own priority in "
+                "the chat. Full gap analysis: `06_QUALITY/quality_review.md`."
             )
         else:
             chat_note += (
                 " The review lists concrete gaps (see `06_QUALITY/quality_review.md`). "
-                "I recommend an improvement pass before packaging."
+                "*Improve the specs* applies them together with the Devil's Advocate "
+                "mitigations and consistency fixes."
             )
         reasoning = "Packaging at this score would bake the gaps into the final documents."
         recommendation = "improve"
@@ -241,7 +284,8 @@ async def quality_review_node(state: ProjectState) -> ProjectState:
                 {
                     "id": "improve",
                     "label": "Improve the specs" + ("" if passing else " (recommended)"),
-                    "description": "Send the gap list back to the agents, revise, and re-score",
+                    "description": "Apply the quality gaps, Devil's Advocate mitigations "
+                    "and consistency fixes, then re-score",
                 },
                 {
                     "id": "confirm",
