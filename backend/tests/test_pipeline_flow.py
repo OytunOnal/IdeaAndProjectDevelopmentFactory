@@ -84,6 +84,14 @@ Improved substantially.
 ```"""
 
 
+DA_REPORT = """Adversarial analysis.
+
+RISK: MEDIUM
+
+## Recommended Adjustments
+1. Cap initial leverage exposure in the financial model."""
+
+
 class QualityLLM:
     """First review scores low, post-improvement review scores high."""
 
@@ -94,6 +102,8 @@ class QualityLLM:
         if "Quality Reviewer" in messages[0]["content"]:
             self.review_calls += 1
             return QUALITY_RESPONSE_LOW if self.review_calls == 1 else QUALITY_RESPONSE_HIGH
+        if "Devil's Advocate" in messages[0]["content"]:
+            return DA_REPORT
         return "Mocked LLM response."
 
 
@@ -273,6 +283,34 @@ async def test_turkish_rewrite_request_revises_not_approves(mock_llms):
     assert result2["market_research"].get("revised") is True
     assert "market_research" not in (result2.get("approved_docs") or [])
     assert _pending_id(result2) == "approve-doc:market_research"
+
+
+async def test_apply_and_recheck_stays_at_the_da_step(mock_llms):
+    """'Apply & re-run this check' improves the specs, then regenerates the
+    DA report against them — the user stays at the DA gate."""
+    config = {"configurable": {"thread_id": "t-da-recheck"}}
+    result = await pipeline.ainvoke(
+        _base_state(idea_brief=dict(CONFIRMED_BRIEF)), config=config
+    )
+    for _ in range(3):
+        result = await _approve(result, config)
+    result = await _approve(result, config)  # approve-research
+    for _ in range(5):
+        result = await _approve(result, config)
+    result = await _approve(result, config)  # approve-spec
+    card = result["pending_decision"]
+    assert card["id"] == "approve-doc:devils_advocate"
+    assert any(o["id"] == "apply_recheck" for o in card["options"])
+
+    result = await _decide(result, config, action="choose", chosen_option="apply_recheck")
+
+    # Specs improved, DA re-ran, and we're back at the DA gate — not consistency
+    assert any("Improvement pass complete" in m["content"] for m in result["messages"])
+    assert _pending_id(result) == "approve-doc:devils_advocate"
+    assert "devils_advocate" not in (result.get("approved_docs") or [])
+    # Continuing normally now proceeds to consistency
+    result = await _approve(result, config)
+    assert _pending_id(result) == "approve-doc:consistency_report"
 
 
 async def test_go_back_reopens_step_without_rewriting(mock_llms):
@@ -565,8 +603,9 @@ def test_report_gate_offers_single_honest_apply_option():
 
     report_card = doc_gate_card("devils_advocate", has_adjustments=True)
     ids = [o["id"] for o in report_card["options"]]
-    assert "apply" in ids and "apply_review" not in ids
-    assert "specs" in report_card["question"]
+    assert "apply" in ids and "apply_recheck" in ids
+    assert "apply_review" not in ids
+    assert "spec documents" in report_card["question"]
 
     spec_card = doc_gate_card("prd", has_adjustments=True)
     ids = [o["id"] for o in spec_card["options"]]

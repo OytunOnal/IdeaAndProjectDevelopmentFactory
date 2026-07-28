@@ -173,7 +173,7 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                 "pipeline_status": "running",
             }
 
-        if chosen in ("apply", "apply_review"):
+        if chosen in ("apply", "apply_review", "apply_recheck"):
             # Stale card safety: if the document carries no real adjustments
             # (e.g. "None — ..."), there is nothing to apply — approve instead
             # of forcing the model into a pointless rewrite.
@@ -205,13 +205,17 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                     "devils_advocate": "Devil's Advocate report",
                     "consistency_report": "Consistency report",
                 }
+                recheck = chosen == "apply_recheck"
                 approved = list(state.get("approved_docs") or [])
-                if doc_key not in approved:
+                # "Apply & re-run this check" keeps the step open: the report
+                # is regenerated against the updated specs after the pass.
+                if not recheck and doc_key not in approved:
                     approved.append(doc_key)
                 messages.append({
                     "id": f"msg-user-{len(messages)}",
                     "role": "user",
-                    "content": f"Apply the {titles[doc_key]}'s recommendations to the specs.",
+                    "content": f"Apply the {titles[doc_key]}'s recommendations to the specs"
+                    + (", then re-run the check." if recheck else "."),
                     "timestamp": "",
                 })
                 return {
@@ -222,6 +226,7 @@ def resolve_decision(state: ProjectState, submission: dict) -> ProjectState:
                         f"Apply the recommended adjustments/mitigations from the "
                         f"{titles[doc_key]} to the affected documents."
                     ),
+                    "quality_rerun_report": doc_key if recheck else None,
                     "decisions": decisions,
                     "messages": messages,
                     "pending_decision": None,

@@ -306,21 +306,33 @@ async def spec_improver_node(state: ProjectState) -> ProjectState:
         k for k in (state.get("approved_docs") or []) if k != "consistency_report"
     ]
 
+    # "Apply & re-run this check": regenerate the requesting report against
+    # the updated specs so the user stays at that step with a fresh analysis.
+    rerun_report = state.get("quality_rerun_report")
+    rerun_reset = {rerun_report: None} if rerun_report else {}
+    next_note = (
+        "The Devil's Advocate will re-check the updated specs next."
+        if rerun_report == "devils_advocate"
+        else "Consistency will re-check the updated specs next."
+    )
+
     return {
         **state,
+        **rerun_reset,
         "quality_improve_requested": False,
         "quality_improve_focus": None,
         "quality_improve_targets": [],
         "quality_top_fixes": [],
         "quality_feedback": None,
         "quality_review_done": False,
+        "quality_rerun_report": None,
         "consistency_report": None,
         "approved_docs": approved_after,
         "messages": agent_message(
             state, "orchestrator",
             "🔧 **Improvement pass complete** — updated: "
             + (", ".join(improved) if improved else "nothing (all improvements failed)")
-            + ". Consistency will re-check the updated specs next.",
+            + f". {next_note}",
         ),
         "current_agent": "orchestrator",
         "pipeline_status": "running",

@@ -66,6 +66,7 @@ class ProjectState(TypedDict, total=False):
     quality_improve_requested: bool
     quality_improve_focus: str | None
     quality_improve_targets: list
+    quality_rerun_report: str | None
     quality_top_fixes: list
     quality_score_history: list
 

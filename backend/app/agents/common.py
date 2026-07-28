@@ -490,8 +490,8 @@ def doc_gate_card(key: str, has_adjustments: bool = False) -> dict:
         # nothing of THIS report to show, so it's a single honest option.
         question += (
             " Its numbered recommendations target the spec documents — apply "
-            "them (consistency re-checks the updated specs next), or approve "
-            "as-is. To apply only some, type in the chat (e.g. 'apply 1 and 3')."
+            "them and continue, or apply and stay at this step to re-check. "
+            "To apply only some, type in the chat (e.g. 'apply 1 and 3')."
         )
         options.append({
             "id": "apply",
@@ -499,6 +499,13 @@ def doc_gate_card(key: str, has_adjustments: bool = False) -> dict:
             "description": "Integrate these recommendations into the spec documents; "
             "consistency re-checks them next",
         })
+        if key == "devils_advocate":
+            options.append({
+                "id": "apply_recheck",
+                "label": "Apply & re-run this check",
+                "description": "Integrate into the specs, then re-run the adversarial "
+                "analysis on the updated documents — stay at this step",
+            })
     elif has_adjustments:
         question += (
             " It ends with numbered Recommended Adjustments — apply them and "
