@@ -409,8 +409,9 @@ async def test_full_pipeline_with_quality_improvement_loop(mock_llms):
     assert result["quality_breakdown"]["rubric_version"] == RUBRIC_VERSION
     assert f"rubric version `{RUBRIC_VERSION}`" in result["quality_feedback"]
 
-    # Improvement pass only touches the docs named in the fixes, then
-    # re-scores → high score, card recommends packaging
+    # Improvement pass only touches the docs named in the fixes, then the
+    # STALE consistency report re-checks the updated specs (own gate) before
+    # the reviewer re-scores — step-by-step, no jumping to the final gate
     result = await _decide(result, config, action="choose", chosen_option="improve")
     improve_note = next(
         m["content"] for m in result["messages"]
@@ -419,6 +420,10 @@ async def test_full_pipeline_with_quality_improvement_loop(mock_llms):
     assert "Product Requirements Document" in improve_note
     assert "System Architecture" in improve_note
     assert "UX Specification" not in improve_note  # untargeted docs untouched
+    assert _pending_id(result) == "approve-doc:consistency_report"
+    assert result.get("quality_score") == 62  # not re-scored yet
+
+    result = await _approve(result, config)  # approve the fresh consistency check
     assert result["quality_score"] == 84
     assert result["quality_score_history"] == [62, 84]
     assert _pending_id(result) == "approve-quality"
@@ -496,6 +501,9 @@ async def test_chat_request_at_quality_gate_triggers_targeted_improvement(
     )
     assert "Product Requirements Document" in improve_note
     assert "System Architecture" not in improve_note  # only the requested target
+    # Step-by-step: stale consistency re-checks first, then the re-score
+    assert _pending_id(result2) == "approve-doc:consistency_report"
+    result2 = await _approve(result2, config)
     assert result2["quality_score"] == 84  # re-scored after the pass
     assert _pending_id(result2) == "approve-quality"
 

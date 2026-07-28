@@ -146,10 +146,18 @@ async def revise_document_node(state: ProjectState) -> ProjectState:
         new_value = document
 
     # A revision during the quality phase invalidates the score — re-review
-    # once the user approves the revised document.
+    # once the user approves the revised document. If a SPEC document changed,
+    # the consistency report is stale too: re-run it (through its gate).
     quality_reset = {}
     if state.get("current_phase") == "quality":
         quality_reset = {"quality_feedback": None, "quality_review_done": False}
+        spec_keys = [s["output_key"] for s in SPEC_AGENTS.values()]
+        if key in spec_keys:
+            quality_reset["consistency_report"] = None
+            quality_reset["approved_docs"] = [
+                k for k in (state.get("approved_docs") or [])
+                if k != "consistency_report"
+            ]
 
     base = {
         **state,
@@ -290,19 +298,29 @@ async def spec_improver_node(state: ProjectState) -> ProjectState:
         except Exception as e:
             logger.error(f"Improvement of {key} failed: {e}")
 
+    # The specs changed, so downstream quality steps are stale: consistency
+    # re-checks the updated documents (through its own gate), then the
+    # reviewer re-scores. This keeps the phase step-by-step instead of
+    # jumping straight to the final gate on old approvals.
+    approved_after = [
+        k for k in (state.get("approved_docs") or []) if k != "consistency_report"
+    ]
+
     return {
         **state,
-        # Clear the review so the quality phase re-scores the improved docs
         "quality_improve_requested": False,
         "quality_improve_focus": None,
         "quality_improve_targets": [],
+        "quality_top_fixes": [],
         "quality_feedback": None,
         "quality_review_done": False,
+        "consistency_report": None,
+        "approved_docs": approved_after,
         "messages": agent_message(
             state, "orchestrator",
             "🔧 **Improvement pass complete** — updated: "
             + (", ".join(improved) if improved else "nothing (all improvements failed)")
-            + ". Re-scoring now...",
+            + ". Consistency will re-check the updated specs next.",
         ),
         "current_agent": "orchestrator",
         "pipeline_status": "running",
