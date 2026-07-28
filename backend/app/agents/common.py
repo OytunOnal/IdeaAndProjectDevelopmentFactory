@@ -484,7 +484,22 @@ def doc_gate_card(key: str, has_adjustments: bool = False) -> dict:
             "description": "Accept this document and move on",
         },
     ]
-    if has_adjustments:
+    if has_adjustments and key in ("devils_advocate", "consistency_report"):
+        # Report recommendations are applied to the SPEC documents, after
+        # which consistency re-checks them — "review again" would have
+        # nothing of THIS report to show, so it's a single honest option.
+        question += (
+            " Its numbered recommendations target the spec documents — apply "
+            "them (consistency re-checks the updated specs next), or approve "
+            "as-is. To apply only some, type in the chat (e.g. 'apply 1 and 3')."
+        )
+        options.append({
+            "id": "apply",
+            "label": "Apply to the specs & continue",
+            "description": "Integrate these recommendations into the spec documents; "
+            "consistency re-checks them next",
+        })
+    elif has_adjustments:
         question += (
             " It ends with numbered Recommended Adjustments — apply them and "
             "keep moving, apply and re-review, or approve as-is. To apply only "

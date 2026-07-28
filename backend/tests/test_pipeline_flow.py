@@ -559,6 +559,20 @@ def test_adjustments_parser_tolerates_model_formatting():
     assert extract_adjustments("## Önerilen Ayarlamalar\nYok — mevcut yön uygun.") is None
 
 
+def test_report_gate_offers_single_honest_apply_option():
+    """Quality-report cards apply to the SPECS — no misleading 'review again'."""
+    from app.agents.common import doc_gate_card
+
+    report_card = doc_gate_card("devils_advocate", has_adjustments=True)
+    ids = [o["id"] for o in report_card["options"]]
+    assert "apply" in ids and "apply_review" not in ids
+    assert "specs" in report_card["question"]
+
+    spec_card = doc_gate_card("prd", has_adjustments=True)
+    ids = [o["id"] for o in spec_card["options"]]
+    assert "apply" in ids and "apply_review" in ids
+
+
 def test_context_strips_adjustments_and_blocklists_them():
     """Earlier docs' suggestions don't leak into downstream agents as context,
     and are passed as an explicit do-not-repeat blocklist."""
