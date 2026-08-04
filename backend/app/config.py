@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
 
+    # Local models via Ollama (OpenAI-compatible endpoint, no API key)
+    ollama_enabled: bool = False           # add Ollama as a fallback provider
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_model_quality: str = "qwen3.6:35b"  # tier1 (spec/judge-grade roles)
+    ollama_model_fast: str = "qwen3:8b"        # tier2/tier3 (fast roles)
+    # Force ALL llm calls through one provider (e.g. "ollama") — used by eval
+    # runs for deterministic, rate-limit-free measurement. Empty = normal order.
+    llm_force_provider: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

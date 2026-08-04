@@ -46,6 +46,12 @@ PROVIDERS = {
         "tier2": "deepseek-chat",
         "tier3": "deepseek-chat",
     },
+    # Local models (Ollama) — models are configurable via .env
+    "ollama": {
+        "tier1": settings.ollama_model_quality,
+        "tier2": settings.ollama_model_fast,
+        "tier3": settings.ollama_model_fast,
+    },
 }
 
 
@@ -68,6 +74,19 @@ def _get_provider_and_key() -> tuple[str, str]:
 
 def _get_all_providers() -> list[tuple[str, str]]:
     """Return all configured providers in priority order."""
+    # Eval/experiment mode: pin every call to one provider (deterministic,
+    # rate-limit-free measurement — e.g. LLM_FORCE_PROVIDER=ollama)
+    if settings.llm_force_provider:
+        forced = settings.llm_force_provider
+        key = "ollama" if forced == "ollama" else dict(_configured_providers()).get(forced, "")
+        return [(forced, key)]
+    providers = _configured_providers()
+    if settings.ollama_enabled:
+        providers.append(("ollama", "ollama"))  # local fallback, no key needed
+    return providers
+
+
+def _configured_providers() -> list[tuple[str, str]]:
     providers = []
     if settings.google_api_key:
         providers.append(("google", settings.google_api_key))
@@ -206,6 +225,8 @@ def _resolve_provider(api_key: str | None) -> tuple[str, str]:
 
 
 def _get_base_url(provider: str) -> str:
+    if provider == "ollama":
+        return settings.ollama_base_url
     if provider == "google":
         return "https://generativelanguage.googleapis.com/v1beta/openai"
     if provider == "cerebras":
