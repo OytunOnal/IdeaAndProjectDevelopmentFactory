@@ -53,3 +53,5 @@ htmlcov/
 
 # Editor config with legacy-system notes
 .vscode/
+
+backend/evals/results/
