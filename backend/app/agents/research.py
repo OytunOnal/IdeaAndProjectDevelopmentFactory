@@ -252,7 +252,7 @@ async def research_discussion_node(state: ProjectState) -> ProjectState:
             messages=llm_messages,
             model_tier=2,
             api_key=state.get("api_key"),
-            temperature=0.5,
+            temperature=0.1,  # intent-bearing call — keep it near-deterministic
             max_tokens=1536,
         )
     except Exception as e:
