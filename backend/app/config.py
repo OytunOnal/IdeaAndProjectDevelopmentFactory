@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Force ALL llm calls through one provider (e.g. "ollama") — used by eval
     # runs for deterministic, rate-limit-free measurement. Empty = normal order.
     llm_force_provider: str = ""
+    # Ollama thinking-mode override for experiments: "on" | "off" | "" (auto:
+    # tier1 thinks, tier2/3 don't). Note: deepseek-r1 models always think.
+    ollama_think: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -185,9 +185,45 @@ async def _call_single(
     model = PROVIDERS[provider][f"tier{model_tier}"]
     if provider == "anthropic":
         return await _call_anthropic(messages, model, key, temperature, max_tokens)
-    else:
-        base_url = _get_base_url(provider)
-        return await _call_openai_compat(messages, model, key, base_url, temperature, max_tokens)
+    if provider == "ollama":
+        # Native API: the OpenAI-compat endpoint ignores think-control, and
+        # Qwen3 then burns the whole token budget inside <think> blocks.
+        # Policy: tier1 (quality roles) thinks; tier2/3 (interactive) doesn't.
+        # OLLAMA_THINK=on|off overrides for experiments.
+        return await _call_ollama_native(
+            messages, model, temperature, max_tokens, think=_ollama_think(model_tier)
+        )
+    base_url = _get_base_url(provider)
+    return await _call_openai_compat(messages, model, key, base_url, temperature, max_tokens)
+
+
+def _ollama_think(model_tier: int) -> bool:
+    override = settings.ollama_think.strip().lower()
+    if override in ("on", "off"):
+        return override == "on"
+    return model_tier == 1
+
+
+async def _call_ollama_native(
+    messages: list[dict], model: str,
+    temperature: float, max_tokens: int, think: bool,
+) -> str:
+    """Call Ollama's native /api/chat (supports think on/off, unlike its
+    OpenAI-compat endpoint). Local model — generous timeout, no API key."""
+    base = settings.ollama_base_url.removesuffix("/v1")
+    # Thinking tokens count against num_predict; without headroom the final
+    # answer gets truncated away inside the reasoning.
+    num_predict = max(max_tokens, 4096) if think else max_tokens
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(f"{base}/api/chat", json={
+            "model": model,
+            "messages": messages,
+            "think": think,
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": num_predict},
+        })
+        resp.raise_for_status()
+        return resp.json()["message"]["content"]
 
 
 async def _stream_single(
@@ -198,10 +234,41 @@ async def _stream_single(
     if provider == "anthropic":
         async for chunk in _stream_anthropic(messages, model, key, temperature, max_tokens):
             yield chunk
+    elif provider == "ollama":
+        async for chunk in _stream_ollama_native(
+            messages, model, temperature, max_tokens, think=_ollama_think(model_tier)
+        ):
+            yield chunk
     else:
         base_url = _get_base_url(provider)
         async for chunk in _stream_openai_compat(messages, model, key, base_url, temperature, max_tokens):
             yield chunk
+
+
+async def _stream_ollama_native(
+    messages: list[dict], model: str,
+    temperature: float, max_tokens: int, think: bool,
+) -> AsyncGenerator[str, None]:
+    """Stream from Ollama's native /api/chat (ndjson lines)."""
+    import json as _json
+
+    base = settings.ollama_base_url.removesuffix("/v1")
+    async with httpx.AsyncClient(timeout=600) as client:
+        async with client.stream("POST", f"{base}/api/chat", json={
+            "model": model,
+            "messages": messages,
+            "think": think,
+            "stream": True,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                data = _json.loads(line)
+                piece = (data.get("message") or {}).get("content", "")
+                if piece:
+                    yield piece
 
 
 def _resolve_provider(api_key: str | None) -> tuple[str, str]:
