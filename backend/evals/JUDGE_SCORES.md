@@ -113,6 +113,50 @@ critique.**
 | qwen3.6:35b think-on | 81% | ~50% but 37% empty-output rate |
 | deepseek-r1:7b | 51% | 3% |
 
+---
+
+# V2 — after the DA/consistency prompt upgrade (judged 2026-08-05)
+
+Prompt changes measured here: DA gained §6 "What's MISSING" (absence scan) and
+§7 "Evidence Audit" (incl. the never-echo rule); consistency gained "Derived
+numbers" (recompute) and the "clean is a claim" rule.
+
+## ⚠️ In-sample caveat (non-negotiable)
+
+These prompts were written LOOKING AT the 15 defects' failure classes. Every
+v2 recall number below is therefore a **development-set** result — inflated by
+construction. General claims require the held-out defect set (Phase 3 of
+LOCAL_MIGRATION_PLAN.md). The honest reading: "the upgrade closes the targeted
+classes on the set that motivated it."
+
+## Recall v1 → v2 (union, same 15 defects)
+
+| Config | v1 | v2 | What changed |
+|---|---|---|---|
+| Frontier | 77% | **100% (15/15)** | Evidence Audit nails both fabrications ("a beta that has not occurred based on its own timeline is a fabricated metric"); §6 catches both removed sections |
+| qwen3-8b think-on | 27% | **57% (8.5/15)** | Fabricated stats now flagged as untraceable instead of ADOPTED; both removed sections caught via §6; consistency now recomputes derived numbers and flags the price mismatch it previously certified as consistent |
+| qwen3.6-35b think-on | ~50% partial | partial again (1 empty, 1 short) | empty-output retry landed after this chain; re-run pending |
+| deepseek-r1-7b | 3% | not fully judged | eliminated for this role; spot-checks show same boilerplate pattern |
+
+## Trust-failure follow-up (8B)
+
+- Fabricated citation: none observed in v2 reports read
+- Fake-evidence adoption: **cured** — "source is not traceable... fabricated
+  numbers could undermine credibility"
+- Wrong "clean" certification: **cured** on FleetSense numbers (price mismatch
+  now Critical) — but B3 churn-math still verified-as-correct (recomputed LTV
+  from the broken lifetime without checking churn→lifetime)
+- Contradictory footer ("3 adjustments + None — holds up") **persists** — an
+  output-format bug worth a deterministic post-process fix
+
+## Clean-bundle FP check (v2, frontier sampled)
+
+No fabrications or false conflicts in the sampled clean reports; the new
+suspicion shows up as legitimate "no source cited" critiques (true statements).
+Over-suspicion cost: none observed in sample.
+
+---
+
 **Verdict: role-dependent assignment is confirmed by data.** The intent role
 can go local (8B think-on) at near-frontier quality; the adversarial-review
 roles cannot yet — frontier stays for DA/consistency/judge until either 35B's

@@ -72,6 +72,8 @@ Challenge, in markdown:
 3. **Technical Risks** — hardest challenge, single points of failure.
 4. **Business Model Risks** — will users actually pay? What evidence exists?
 5. **Unvalidated Assumptions** — list every untested assumption, ranked by impact.
+6. **What's MISSING** — the hardest check: what should exist in documents for THIS kind of product but is absent entirely? Think obligations, not features: privacy/data-protection and consent (especially for personal, financial, health, or location data), legal/compliance exposure, security, safety, accessibility. If a product tracks people or holds their money/data and the documents never address it, that is a top finding. Absence is easy to miss — actively scan for it.
+7. **Evidence Audit** — every statistic, study, pilot, beta, or benchmark the documents cite must be traceable to the documents themselves (a launch plan that hasn't happened yet cannot have produced results). Flag any number that appears from nowhere as an unvalidated claim. NEVER repeat such a figure as supporting evidence in your own arguments — a fabricated number you echo becomes your fabrication.
 
 Every risk you raise MUST come with at least one concrete mitigation or pivot — never leave the user with "this won't work" and no path forward.
 
@@ -81,7 +83,7 @@ End with an overall risk rating line `RISK: LOW | MEDIUM | HIGH | CRITICAL`, the
 
 Up to 3 NUMBERED project-level changes that would defuse the biggest risks — the user can apply these to the specs with one click, so make them concrete and self-contained. High bar, no filler. If the risks are already adequately mitigated, write exactly: None — the current direction holds up.
 
-Max ~700 words, specific counter-arguments only — no generic caution."""
+Max ~850 words, specific counter-arguments only — no generic caution."""
 
 
 CONSISTENCY_PROMPT = """You are the Consistency Checker of ProjectFactory. Validate that the project documents are internally consistent.
@@ -91,9 +93,10 @@ Check and report in markdown:
 1. **Feature consistency** — every MVP feature in the PRD has user stories and architecture support; no orphan features.
 2. **Terminology** — same concepts named the same way across documents.
 3. **Numbers** — market sizes, prices, timelines, and costs don't contradict between documents.
-4. **Scope** — MVP scope is identical in PRD, architecture, and financial assumptions.
+4. **Derived numbers** — recompute every calculated value the documents state (LTV from ARPU × lifetime, ratios from their components, retention from churn, totals from parts). A stated result that contradicts its own inputs is a critical inconsistency — show the correct arithmetic.
+5. **Scope** — MVP scope is identical in PRD, architecture, and financial assumptions.
 
-Output: a table of inconsistencies (location, severity critical/major/minor, suggested fix). If a category is clean, say so in one line. Max ~500 words.
+Never certify a category as clean without having checked it — "clean" is a claim, and a wrong "clean" is worse than a missed item. Output: a table of inconsistencies (location, severity critical/major/minor, suggested fix). If a category is clean, say so in one line. Max ~550 words.
 
 Finish with exactly this heading:
 
