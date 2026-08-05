@@ -1,0 +1,181 @@
+# Seeded-defect manifest — DA / consistency-checker recall eval.
+#
+# Each defect is a patch applied to the CLEAN golden docs to produce the
+# DEFECTED bundle. The runner asserts every `find` matches exactly once.
+# `detection` = what a report must substantively identify for the judge to
+# score a HIT (paraphrase fine; quoting the planted text not required).
+# `expected_agent`: which agent SHOULD catch it (either = both acceptable).
+#
+# Type coverage: internal-contradiction, fabricated-evidence, arithmetic-error,
+# cross-doc-inconsistency, infeasible-tech, missing-critical (removal),
+# out-of-scope-reference, absurd-target, audience-mismatch, impossible-math,
+# infeasible-plan. Severity: obvious | subtle.
+
+# ═══════════ InvoiceFox ═══════════
+
+- id: A1-free-limit-contradiction
+  project: invoicefox
+  doc: prd
+  type: internal-contradiction
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "2. Automated reminder sequences — polite, escalating emails on a configurable cadence; Free plan tracks up to 5 active invoices per month"
+    replace: "2. Automated reminder sequences — polite, escalating emails on a configurable cadence; unlimited invoices tracked on every plan, including Free"
+  detection: Flags that the features section claims unlimited invoices on Free while the pricing section limits Free to 5 active invoices/month.
+
+- id: A2-fabricated-beta
+  project: invoicefox
+  doc: gtm_strategy
+  type: fabricated-evidence
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "Free plan is the growth engine (every reminder email footer: \"sent via InvoiceFox\"); Pro upgrade triggered at the 5-invoice limit or when analytics unlock matters."
+    replace: "Free plan is the growth engine (every reminder email footer: \"sent via InvoiceFox\"); Pro upgrade triggered at the 5-invoice limit or when analytics unlock matters. Our closed beta of 200 freelancers converted at 34%, so the funnel is already proven."
+  detection: Questions the unsupported 200-freelancer/34% beta claim (no such beta exists; launch plan starts with a 50-person closed list).
+
+- id: A3-ltv-cac-math
+  project: invoicefox
+  doc: financial_model
+  type: arithmetic-error
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "- **LTV:** $144 (12 × $12)\n- **LTV:CAC ≈ 3.6 : 1** — healthy above the 3:1 rule-of-thumb threshold"
+    replace: "- **LTV:** $35\n- **LTV:CAC ≈ 3.6 : 1** — healthy above the 3:1 rule-of-thumb threshold"
+  detection: Notes that LTV $35 against CAC $40 cannot yield 3.6:1 (LTV is below CAC; the healthy-ratio claim is false).
+
+- id: A4-arpu-price-mismatch
+  project: invoicefox
+  doc: financial_model
+  type: cross-doc-inconsistency
+  severity: subtle
+  expected_agent: consistency
+  patch:
+    find: "- **ARPU:** $12/month"
+    replace: "- **ARPU:** $19/month"
+  detection: Flags the $19 ARPU against the $12 Pro price stated in the PRD (and in the model's own revenue-assumptions line).
+
+- id: A5-wasm-finetune
+  project: invoicefox
+  doc: architecture
+  type: infeasible-tech
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "- **Stripe integration** — payment links + webhooks for paid-status sync"
+    replace: "- **Stripe integration** — payment links + webhooks for paid-status sync\n- **Personalization engine** — fine-tunes a 7B language model on-device in the user's browser via WebAssembly to adapt reminder tone per client"
+  detection: Challenges in-browser 7B model fine-tuning as technically infeasible (or wildly disproportionate for reminder-tone personalization).
+
+- id: A6-privacy-removed
+  project: invoicefox
+  doc: prd
+  type: missing-critical
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "## Compliance & privacy\nInvoices contain personal and financial data. v1 ships with: GDPR-compliant data handling (EU users), data export & delete-my-account, TLS everywhere, no card data stored on our side (PCI scope stays with Stripe).\n\n"
+    replace: ""
+  detection: Raises the absence of any privacy/GDPR/compliance treatment despite invoices carrying personal and financial data.
+
+- id: A7-workspace-scope
+  project: invoicefox
+  doc: ux_design
+  type: out-of-scope-reference
+  severity: subtle
+  expected_agent: consistency
+  patch:
+    find: "4. **Paid moment** — when Stripe confirms payment, a small celebration state + prompt to send a thank-you note. Positive loop, not just nagging."
+    replace: "4. **Paid moment** — when Stripe confirms payment, a small celebration state + prompt to send a thank-you note. Positive loop, not just nagging.\n5. **Team workspace** — shared invoice board where agency members assign and comment on invoices in real time."
+  detection: Notes the UX specifies a team-workspace flow that the PRD explicitly scopes OUT of v1.
+
+- id: A8-absurd-target
+  project: invoicefox
+  doc: gtm_strategy
+  type: absurd-target
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "- 5,000 registered / 600 paying users by month 12\n- Blended CAC under $40 by month 6"
+    replace: "- 10 million registered users by month 3 on a $500 total marketing budget\n- Blended CAC under $40 by month 6"
+  detection: Calls out 10M users in 3 months on a $500 budget as unrealistic.
+
+# ═══════════ FleetSense ═══════════
+
+- id: B1-offline-contradiction
+  project: fleetsense
+  doc: architecture
+  type: internal-contradiction
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "The driver app is **offline-tolerant**: it caches the day's route and queues proof-of-delivery uploads, syncing when connectivity returns; live tracking and re-optimization require a connection by nature."
+    replace: "The system is **fully offline-first end to end — no cloud connectivity is required for any feature**. The driver app caches the day's route and queues proof-of-delivery uploads; dispatchers watch van positions update live on the map in real time."
+  detection: Flags that a no-connectivity-required system cannot simultaneously provide real-time live tracking on the dispatcher map.
+
+- id: B2-fabricated-pilot
+  project: fleetsense
+  doc: gtm_strategy
+  type: fabricated-evidence
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "4. **Word of fleet** — this market talks in WhatsApp groups; referral = 2 months free per referred fleet"
+    replace: "4. **Word of fleet** — this market talks in WhatsApp groups; referral = 2 months free per referred fleet\n\nOur 14-fleet pilot program cut fuel costs by 31% on average, which anchors all sales conversations."
+  detection: Questions the 14-fleet/31% pilot claim (launch phases show design partners have not started yet; no pilot exists).
+
+- id: B3-churn-math
+  project: fleetsense
+  doc: financial_model
+  type: impossible-math
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "- **Monthly fleet churn: 3%** → average paid lifetime ≈ 33 months → **~69% of fleets retained after 12 months**"
+    replace: "- **Monthly fleet churn: 10%** → average paid lifetime ≈ 33 months → **~90% of fleets retained after 12 months**"
+  detection: Notes that 10% monthly churn is mathematically incompatible with a 33-month lifetime and ~90% annual retention (10% monthly implies ~28% retained).
+
+- id: B4-cli-audience
+  project: fleetsense
+  doc: ux_design
+  type: audience-mismatch
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "A simple guided wizard covers the first-week learning curve."
+    replace: "Navigation is exclusively via a command-line-style keyboard palette with no mouse support — ideal for our non-technical dispatcher audience."
+  detection: Challenges keyboard-only CLI-style navigation as contradictory for the stated audience (and inconsistent with the guided, low-friction philosophy elsewhere).
+
+- id: B5-price-mismatch
+  project: fleetsense
+  doc: gtm_strategy
+  type: cross-doc-inconsistency
+  severity: subtle
+  expected_agent: consistency
+  patch:
+    find: "Self-serve at **$8/van/month** (aligned with the PRD); 14-day trial, no card upfront."
+    replace: "Self-serve at **$15/van/month**; 14-day trial, no card upfront."
+  detection: Flags the $15/van GTM price against the $8/van price in the PRD and financial model.
+
+- id: B6-consent-removed
+  project: fleetsense
+  doc: prd
+  type: missing-critical
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "## Driver privacy & consent\nLive GPS tracking of employees is legally sensitive. v1 ships with: explicit driver consent flow in the app, tracking active only during shift hours, owner-visible audit log of location access, and per-country data-retention defaults (KVKK/GDPR aligned).\n\n"
+    replace: ""
+  detection: Raises the absence of driver-consent/privacy treatment despite continuous GPS tracking of employees.
+
+- id: B7-solo-microservices
+  project: fleetsense
+  doc: architecture
+  type: infeasible-plan
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "Two engineers, 4 months to v1: months 1-2 route planner + driver app core, month 3 live map + reports, month 4 hardening and pilot onboarding."
+    replace: "A single engineer will deliver all six services — solver, live map, driver app, reports, billing, and admin — as independent microservices within 6 weeks."
+  detection: Challenges one engineer shipping six microservices in six weeks as an unrealistic plan (and/or questions microservices for a v1 of this size).
