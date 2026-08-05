@@ -9,6 +9,7 @@ quality-scored project specification — with a human in the loop at every gate.
 [![FastAPI](https://img.shields.io/badge/FastAPI-Python_3.13-009688?logo=fastapi&logoColor=white)](backend)
 [![LangGraph](https://img.shields.io/badge/LangGraph-14_live_agents-1C3C3C)](backend/app/agents)
 [![Claude API](https://img.shields.io/badge/Claude-web__search_grounding-D97757?logo=anthropic&logoColor=white)](backend/app/agents/research.py)
+[![Local-first](https://img.shields.io/badge/Ollama-chat_layer_local_·_90%25_vs_frontier_87%25-4B5563?logo=ollama&logoColor=white)](LOCAL_MIGRATION_PLAN.md)
 [![CI](https://github.com/OytunOnal/IdeaAndProjectDevelopmentFactory/actions/workflows/ci.yml/badge.svg)](https://github.com/OytunOnal/IdeaAndProjectDevelopmentFactory/actions)
 
 <img src="docs/screenshot.png" alt="ProjectFactory workspace" width="850">
@@ -69,6 +70,37 @@ questions about the documents before you approve each phase.
 `design_system_architect` are speced ([docs/03](docs/03_AGENT_SPECIFICATIONS.md))
 and stubbed — roadmap.
 
+## Evaluated first, migrated second: the local-model story
+
+Every agent role is being migrated to **local models (Ollama)** — but only
+after it clears a measuring harness. The evals came first, the migration
+decisions fell out of the numbers:
+
+| Config | Intent role (68-case golden set) | Adversarial-review role (15 seeded defects) |
+|---|---|---|
+| Frontier API (fallback chain) | 87% | 77% → **100%** after a measured prompt upgrade* |
+| **qwen3:8b, thinking on — now runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | 27% → 57%* — stays frontier |
+| qwen3.6:35b, thinking on | 81% | ~50%, unstable empty-output — stays frontier |
+| deepseek-r1:7b | 51% | 3% — "reasoning model ⇒ good reviewer" falsified |
+
+<sub>*development-set numbers — the prompts were tuned against these fixtures;
+a held-out set decides any general claim. The caveat is stamped in the reports.</sub>
+
+What made the local chat layer reach (and pass) frontier parity is a
+**semantic verification stack**, not keyword rules: before a state-changing
+action applies, the model answers one narrow question about it — "is this an
+explicit go-ahead?" (3 diverse samples, majority vote, fail-open), "is this an
+instruction or a question to answer first?", "which document does this change
+belong to?". It exploits the measured asymmetry that small models are weak at
+broad action parsing but near-frontier on narrow questions — and local
+inference makes the extra calls free.
+
+The full trail: [`EVAL_PLAN.md`](EVAL_PLAN.md) (design for all 29 nodes) ·
+[`backend/evals/REPORT.md`](backend/evals/REPORT.md) (role × model matrix and
+round history) · [`backend/evals/JUDGE_SCORES.md`](backend/evals/JUDGE_SCORES.md)
+(per-defect judging) · [`LOCAL_MIGRATION_PLAN.md`](LOCAL_MIGRATION_PLAN.md)
+(principles, phases, and the keyword-vs-semantic architecture decision).
+
 ## AI engineering under the hood
 
 This project demonstrates, in working code:
@@ -77,14 +109,27 @@ This project demonstrates, in working code:
   orchestrator-router, conditional edges, and per-project checkpointing
   ([graph.py](backend/app/agents/graph.py), [orchestrator.py](backend/app/agents/orchestrator.py))
 - **Human-in-the-loop design** — per-document approval gates with revision
-  loops, "apply & continue" vs "apply & review" semantics, reopenable steps,
-  configurable autonomy (`ask` / `suggest` / `delegate` per decision category)
+  loops, "apply & continue" vs "apply & review" semantics, reopenable steps —
+  including **cross-phase rewind** (jump back to an earlier phase; documents
+  and approvals are preserved, phase gates re-confirm on the way forward) and
+  post-completion editing; configurable autonomy (`ask` / `suggest` /
+  `delegate` per decision category)
   ([decision_handler.py](backend/app/agents/decision_handler.py))
-- **Intent routing with deterministic guardrails** — free-text chat maps to
-  typed actions (revise / approve / reopen / improve); unambiguous requests
-  ("rewrite this", "go back to X") bypass LLM intent parsing entirely, so
-  misclassification can't silently approve or discard user intent
-  ([common.py](backend/app/agents/common.py))
+- **Intent routing with layered guardrails** — free-text chat maps to typed
+  actions (revise / approve / reopen / improve); unambiguous requests
+  ("rewrite this", "go back to X") bypass LLM parsing deterministically, and
+  state-changing actions pass **narrow semantic verification** (majority-voted
+  go-ahead check, instruction-vs-question gate, glossary-assisted target
+  routing) before they touch state ([common.py](backend/app/agents/common.py))
+- **Per-role model routing** — each role can run on a different provider
+  (`LLM_ROLE_PROVIDERS=discussion=ollama`), with per-role thinking control,
+  force/fallback precedence, and Ollama-specific reliability engineering
+  (native-API thinking control, context-window and empty-output handling —
+  each one a measured failure mode) ([llm.py](backend/app/agents/llm.py))
+- **Evaluation harnesses as first-class code** — a 68-case golden-intent set
+  driven through the real code path, and a seeded-defect eval (15 planted
+  flaws across two fictional projects, recall + false-positive scored under a
+  written judging protocol) ([backend/evals/](backend/evals/))
 - **Auditable LLM-as-judge** — the quality score is rubric-versioned (stamped
   in code, so a rubric edit can't silently re-rate old packages) and every
   deduction must cite the rubric line plus a quoted span from the document
@@ -145,44 +190,64 @@ pipeline. Export the ZIP from the file tree when it completes.
 |---|---|---|
 | Free providers only | Knowledge-based estimates, flagged as such | **$0** |
 | + `ANTHROPIC_API_KEY` | Live web search, cited sources | ~$0.20 (Haiku) |
+| + Ollama (optional) | Chat/intent layer runs **on your machine** — deterministic, rate-limit-free, private | $0 |
 
-Everything except research runs on free-tier providers either way.
+Everything except research runs on free-tier providers either way. With
+[Ollama](https://ollama.com) installed and `qwen3:8b` pulled, the
+`.env.example` routing lines put the conversation layer on local inference
+(measured at 90% vs the frontier chain's 87% on the intent set), with the
+frontier chain as automatic fallback.
 
 ## Repository layout
 
 ```
 ├── backend/                FastAPI + LangGraph
 │   ├── app/agents/         the pipeline: graph, orchestrator, 14 agents
-│   │   ├── llm.py          multi-provider layer (fallback, BYOK, streaming)
+│   │   ├── llm.py          multi-provider layer (fallback, BYOK, per-role
+│   │   │                   routing, Ollama native path with thinking control)
 │   │   ├── research.py     web-grounded discovery agents
 │   │   ├── specification.py · quality.py · packaging.py
 │   │   └── graph.py        StateGraph wiring + SQLite checkpointing
 │   ├── app/routers/        REST API (projects, pipeline, files, export)
 │   ├── app/websocket/      live progress channel
-│   └── tests/              pipeline flow tests (mocked LLMs) — no API keys needed
+│   ├── evals/              golden-intent + seeded-defect harnesses, fixtures,
+│   │                       judging protocol, REPORT.md / JUDGE_SCORES.md
+│   └── tests/              pipeline flow + guard tests (mocked LLMs) — no keys needed
 ├── frontend/               Next.js 16 + TypeScript + Tailwind + Shadcn/UI
 │   └── src/                workspace: chat + decision cards, file tree, viewer
 ├── docs/                   product docs: PRD, architecture, 19 agent specs,
 │                           API contract, UI/UX spec, roadmap
+├── EVAL_PLAN.md            evaluation design for all 29 graph nodes
+├── LOCAL_MIGRATION_PLAN.md eval-gated local-model migration: principles + phases
 └── Makefile                dev/install/lint/test shortcuts
 ```
 
 ## Testing
 
 ```bash
-make test-backend    # 20 tests: full pipeline flow with mocked LLMs, gates,
-                     # revisions, intent shortcuts, quality loop, persistence
+make test-backend    # 47 tests: full pipeline flow with mocked LLMs, gates,
+                     # revisions, intent shortcuts, negation guard, persistence
 make lint-backend    # ruff
 cd frontend && npm run lint && npx tsc --noEmit
 ```
 
 The pipeline tests drive idea → research → spec → quality → packaging through
 the real LangGraph graph with mocked LLM calls — routing, gates, and state
-transitions are verified without spending a token.
+transitions are verified without spending a token. The LLM-dependent evals
+(`python -m evals.eval_runner`, `python -m evals.defect_runner`) run locally
+against Ollama or the frontier chain and write scored JSON reports.
 
 ## Honest limitations / roadmap
 
 - Four agents are speced but stubbed (brand, legal, visual design, design system).
+- The eval numbers above are **development-set results** — verifier policies
+  were iterated against those fixtures. A held-out fixture set (planned) decides
+  any general claim; known remaining classes ("the spec"→PRD mapping,
+  conditional branch-guessing, multi-document edits in one message) are parked
+  for distillation or feature work rather than more prompt surgery.
+- Only the discussion/intent role runs local so far; generator and reviewer
+  roles measured below the bar and stay on the frontier chain
+  ([REPORT.md](backend/evals/REPORT.md) has the numbers and why).
 - Free-tier rate limits are real: context windows sent to quality agents are
   truncated to fit Groq's 6k TPM; a paid key removes the constraint.
 - Auth (Supabase magic-link) is optional and off by default; the SQL schema for
