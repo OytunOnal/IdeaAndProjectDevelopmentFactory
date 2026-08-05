@@ -103,32 +103,68 @@ def _configured_providers() -> list[tuple[str, str]]:
     return providers
 
 
+def _parse_role_map(raw: str) -> dict[str, str]:
+    """Parse "a=x,b=y" style role maps from settings."""
+    result = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            result[k.strip()] = v.strip().lower()
+    return result
+
+
+def _role_providers_for(role: str | None) -> list[tuple[str, str]]:
+    """Provider order for a call: force > role preference > default chain.
+
+    A role routed to ollama gets it FIRST with the frontier chain as fallback —
+    availability over purity; the generic failure log shows any fallback."""
+    if settings.llm_force_provider:
+        return _get_all_providers()
+    providers = _get_all_providers()
+    if role and _parse_role_map(settings.llm_role_providers).get(role) == "ollama":
+        logger.info(f"Role '{role}' routed to local (ollama-first)")
+        return [("ollama", "ollama")] + [p for p in providers if p[0] != "ollama"]
+    return providers
+
+
+def _role_think_for(role: str | None) -> bool | None:
+    """Role-level thinking override, or None to fall through to tier/global."""
+    if not role:
+        return None
+    value = _parse_role_map(settings.llm_role_think).get(role)
+    return {"on": True, "off": False}.get(value)
+
+
 async def call_llm(
     messages: list[dict],
     model_tier: int = 2,
     api_key: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    role: str | None = None,
 ) -> str:
     """Make a non-streaming LLM call with automatic fallback.
 
     Tries the resolved provider first. On failure (rate limit, no credits, etc.)
-    falls back to the next available provider.
+    falls back to the next available provider. `role` engages the per-role
+    routing map (see LOCAL_MIGRATION_PLAN.md).
     """
+    think = _role_think_for(role)
+
     # If user provided a specific key, try that first then fall back
     if api_key and api_key.strip():
         provider, key = _resolve_provider(api_key)
         try:
-            return await _call_single(messages, provider, key, model_tier, temperature, max_tokens)
+            return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think)
         except Exception as e:
             logger.warning(f"Provider {provider} (user key) failed: {e}. Trying fallbacks...")
 
-    # Try all configured providers with retry on rate limit
+    # Try providers in role-aware order with retry on rate limit
     errors = []
-    for provider, key in _get_all_providers():
+    for provider, key in _role_providers_for(role):
         for attempt in range(2):  # retry once on 429
             try:
-                return await _call_single(messages, provider, key, model_tier, temperature, max_tokens)
+                return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think)
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str and attempt == 0:
@@ -180,7 +216,7 @@ async def stream_llm(
 
 async def _call_single(
     messages: list[dict], provider: str, key: str, model_tier: int,
-    temperature: float, max_tokens: int,
+    temperature: float, max_tokens: int, think: bool | None = None,
 ) -> str:
     model = PROVIDERS[provider][f"tier{model_tier}"]
     if provider == "anthropic":
@@ -188,10 +224,12 @@ async def _call_single(
     if provider == "ollama":
         # Native API: the OpenAI-compat endpoint ignores think-control, and
         # Qwen3 then burns the whole token budget inside <think> blocks.
-        # Policy: tier1 (quality roles) thinks; tier2/3 (interactive) doesn't.
-        # OLLAMA_THINK=on|off overrides for experiments.
+        # Think precedence: role map > OLLAMA_THINK env > tier rule
+        # (tier1/quality thinks, tier2/3/interactive doesn't).
+        if think is None:
+            think = _ollama_think(model_tier)
         return await _call_ollama_native(
-            messages, model, temperature, max_tokens, think=_ollama_think(model_tier)
+            messages, model, temperature, max_tokens, think=think
         )
     base_url = _get_base_url(provider)
     return await _call_openai_compat(messages, model, key, base_url, temperature, max_tokens)
@@ -215,20 +253,27 @@ async def _call_ollama_native(
     # answer gets truncated away inside the reasoning.
     num_predict = max(max_tokens, 4096) if think else max_tokens
     async with httpx.AsyncClient(timeout=900) as client:
-        resp = await client.post(f"{base}/api/chat", json={
-            "model": model,
-            "messages": messages,
-            "think": think,
-            "stream": False,
-            # num_ctx: Ollama's default context window (~4k) silently truncates
-            # long-prompt + thinking runs — measured: 35B report calls returned
-            # empty content because thinking never fit. 16k covers the report
-            # agents' 12.5k-char doc context with thinking headroom.
-            "options": {"temperature": temperature, "num_predict": num_predict,
-                        "num_ctx": 16384},
-        })
-        resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        for attempt in range(2):
+            resp = await client.post(f"{base}/api/chat", json={
+                "model": model,
+                "messages": messages,
+                "think": think,
+                "stream": False,
+                # num_ctx: Ollama's default context window (~4k) silently
+                # truncates long-prompt + thinking runs — measured: 35B report
+                # calls returned empty content because thinking never fit.
+                "options": {"temperature": temperature, "num_predict": num_predict,
+                            "num_ctx": 16384},
+            })
+            resp.raise_for_status()
+            content = resp.json()["message"]["content"]
+            if content.strip() or not think:
+                return content
+            # Measured failure mode (qwen3.6-35b): thinking consumes the whole
+            # budget and content comes back empty. One retry, double headroom.
+            logger.warning(f"Ollama {model}: empty content after thinking — retrying with 2x num_predict")
+            num_predict *= 2
+        return content
 
 
 async def _stream_single(

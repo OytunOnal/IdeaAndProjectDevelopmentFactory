@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # Ollama thinking-mode override for experiments: "on" | "off" | "" (auto:
     # tier1 thinks, tier2/3 don't). Note: deepseek-r1 models always think.
     ollama_think: str = ""
+    # Per-ROLE routing (the migration switchboard — LOCAL_MIGRATION_PLAN.md).
+    # e.g. LLM_ROLE_PROVIDERS="discussion=ollama,summary=ollama"
+    #      LLM_ROLE_THINK="discussion=on"
+    # A role mapped to ollama is tried on ollama FIRST, with the normal
+    # frontier chain as fallback (availability over purity; fallbacks logged).
+    llm_role_providers: str = ""
+    llm_role_think: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

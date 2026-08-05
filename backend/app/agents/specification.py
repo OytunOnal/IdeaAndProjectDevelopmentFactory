@@ -334,6 +334,7 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
             api_key=state.get("api_key"),
             temperature=0.1,  # intent-bearing call — keep it near-deterministic
             max_tokens=1536,
+            role="discussion",  # per-role routing (LOCAL_MIGRATION_PLAN.md)
         )
     except Exception as e:
         logger.error(f"Review discussion failed: {e}")
