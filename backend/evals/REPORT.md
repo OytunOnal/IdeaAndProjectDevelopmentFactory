@@ -1,4 +1,30 @@
-# Local-vs-Frontier Agent Evaluation — Report v1 (2026-08-05)
+# Local-vs-Frontier Agent Evaluation — Reports
+
+## Phase 1 final (2026-08-05 evening): local discussion role at 90±1, above frontier
+
+Seven measurement rounds on the 68-case set with qwen3:8b think-on:
+82 → 79 → 87 → 84 → 91 → 85 → 90. The full stack (3-vote self-consistent
+approve verification, a two-sided instruction-vs-question gate on revise, a
+target-routing question with glossary, plus two product features — cross-phase
+rewind and post-completion editing) settled into a **90±1 band vs frontier's
+87**, with the safety invariant (zero wrong approvals, zero negation
+inversions) holding across the final three rounds. Dev-set caveat applies as
+always; a held-out set decides the general claim.
+
+The oscillation itself was the main lesson: every one-sided policy phrasing
+(strict or loose, in either verifier) swung the pendulum — misses on one side
+returned as false-positives on the other. Two-sided policy statements plus
+majority voting ended it. Remaining classes are explicitly parked for
+distillation or feature work, not further prompt surgery: the "spec"→prd
+mapping (2 cases), conditional branch-guessing (1), multi-document edits in
+one message (1, needs multi-action support), and a ±2-3-case sampling noise
+floor. One genuine contract bug was found on the way: the roadmap was missing
+from the revise schema's allowed targets — the eval's three-round "model won't
+act" signal was a schema prohibition.
+
+---
+
+# Report v1 (2026-08-05)
 
 Goal: decide, **per agent role**, whether a local model (Ollama, 6 GB laptop
 GPU) can replace the frontier API without quality loss. Two evals, six model

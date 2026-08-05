@@ -50,7 +50,18 @@ _QUALITY_REPORTS = {
 
 def _find_agent(key: str) -> dict | None:
     """Locate the producing agent's spec (prompt/title/emoji) by output key."""
-    for agents in (RESEARCH_AGENTS, SPEC_AGENTS, _QUALITY_REPORTS):
+    from app.agents.packaging import PLANNING_PROMPT  # local import: avoids cycle
+
+    packaging_docs = {
+        "planning_agent": {
+            "prompt": PLANNING_PROMPT,
+            "output_key": "implementation_roadmap",
+            "title": "Implementation Roadmap",
+            "emoji": "🗺️",
+            "tier": 2,
+        },
+    }
+    for agents in (RESEARCH_AGENTS, SPEC_AGENTS, _QUALITY_REPORTS, packaging_docs):
         for spec in agents.values():
             if spec["output_key"] == key:
                 return spec

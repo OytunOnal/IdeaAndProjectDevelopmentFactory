@@ -310,6 +310,15 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
         if gate_key
         else ""
     )
+    # Product decision (2026-08-05): completion does not lock the project —
+    # edit requests keep working, including on the roadmap.
+    completed_note = (
+        "\n\nThe project is COMPLETED, but documents can still be revised on "
+        "request — treat edit requests normally (revise action), including the "
+        "implementation_roadmap."
+        if state.get("current_phase") == "completed"
+        else ""
+    )
     system = (
         "You are the Orchestrator of ProjectFactory. Answer the user's questions "
         "concisely, grounded in the project documents below. Be constructive: "
@@ -317,6 +326,7 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
         "rather than defending the documents."
         + ACTION_CAPABILITY
         + gate_note
+        + completed_note
         + "\n\n" + grounding
     )
 

@@ -1,5 +1,6 @@
 """Shared helpers for pipeline agents."""
 
+import asyncio
 import json
 import logging
 import re
@@ -51,7 +52,7 @@ YOU CAN TAKE ACTION. There are no UI forms, menus, or buttons for the user to fi
 
 To rewrite one document with specific feedback (also use this when the user asks to apply SOME of a document's Recommended Adjustments — name the items in the feedback). Include "then": "continue" ONLY when the user explicitly wants to skip reviewing the result ("apply and move on", "ekle ve sonrakine geç"). "Re-run this step and continue from there" ("baştan çalıştır ve oradan devam edelim") means they DO want to see the re-run output — use "then": "review":
 ```json
-{"action": "revise", "target": "<one of: market_research|competitor_analysis|tech_feasibility|prd|architecture|ux_design|gtm_strategy|financial_model>", "feedback": "<the concrete change request, self-contained>", "then": "continue|review"}
+{"action": "revise", "target": "<one of: market_research|competitor_analysis|tech_feasibility|prd|architecture|ux_design|gtm_strategy|financial_model|implementation_roadmap>", "feedback": "<the concrete change request, self-contained>", "then": "continue|review"}
 ```
 
 To run an improvement pass across the specs (e.g. fixing quality gaps or consistency issues):
@@ -112,12 +113,21 @@ def parse_action(text: str) -> dict | None:
     return None
 
 
-# Which documents belong to which phase's gates (reopen is same-phase only —
-# cross-phase rollback would need phase state rewinding)
+# Which documents belong to which phase's gates
 PHASE_DOC_KEYS = {
     "discovery": ("market_research", "competitor_analysis", "tech_feasibility"),
     "specification": ("prd", "architecture", "ux_design", "gtm_strategy", "financial_model"),
     "quality": ("devils_advocate", "consistency_report"),
+}
+
+# Phase-level checkpoints reset by a cross-phase rewind (documents and their
+# individual approvals are kept — only the phase gates re-confirm on the way
+# forward; project_files regenerate so the run can complete again).
+_PHASE_FLAG_RESETS = {
+    "discovery": {"research_approved": False, "research_review_done": False},
+    "specification": {"spec_review_done": False},
+    "quality": {"quality_review_done": False, "quality_improve_requested": False},
+    "packaging": {"project_files": None},
 }
 
 # How users refer to documents in chat (lowercase substrings, EN + TR)
@@ -159,47 +169,107 @@ async def verify_discussion_action(state: ProjectState, action: dict) -> dict | 
     user_msg = _last_user_message(state)
 
     if act == "approve":
-        # Narrow yes/no: is this a go-ahead? The policy definition lives here —
-        # casual forms COUNT as approvals; only no-decision or negated don't.
+        # Narrow yes/no with the full approval policy — BOTH directions stated
+        # (single-sided phrasings oscillated between killing real approvals and
+        # letting non-decisions through, measured across four eval rounds).
         question = (
             f'The user\'s latest message in a project chat:\n"{user_msg}"\n\n'
             "Is this message a go-ahead to approve the current document and "
-            "continue NOW? Casual and short forms COUNT as approvals: a bare "
-            'thumbs-up emoji, "lgtm", "ship it", typo\'d approvals, and praise '
-            'that includes a continue ("çok güzel, devam edelim"). Answer no '
-            "ONLY when there is genuinely no go-ahead — pure commentary or "
-            'praise with no decision, a question, a conditional ("approve if"), '
-            'or a negated approval ("don\'t approve yet"). '
+            "continue NOW?\n"
+            "COUNTS as a go-ahead (any language, typos and SMS abbreviations "
+            'included): a bare thumbs-up emoji, "lgtm", "ship it", and praise '
+            'that includes a continue ("çok güzel, devam edelim").\n'
+            "Does NOT count: pure commentary or praise with no decision, "
+            'a QUESTION about whether to approve ("should we approve?", '
+            '"approve edelim mi sence?"), hedged uncertainty ("I think? not '
+            '100% sure"), a conditional ("approve if X"), or a negated '
+            'approval ("don\'t approve yet").\n'
             "Answer with exactly one word: yes or no."
         )
-        try:
-            reply = await call_llm(
+        # Self-consistency: 3 diverse samples, majority vote — a single sample
+        # proved too phrasing-sensitive. Local inference makes votes free.
+        async def _vote() -> str:
+            return await call_llm(
                 messages=[{"role": "user", "content": question}],
-                model_tier=3, temperature=0.0, max_tokens=10,
-                role="verify", think=False,  # narrow question — thinking only adds failure modes
+                model_tier=3, temperature=0.7, max_tokens=10,
+                role="verify", think=False,
             )
-        except Exception:
-            return action  # verification unavailable → let the action stand
-        if not reply.strip():
-            return action  # FAIL OPEN: an empty verdict must not veto the action
-        if "yes" not in reply.strip().lower()[:20]:
-            logger.info("Approve action rejected by semantic verification")
-            return None
-        return action
+
+        votes = await asyncio.gather(*(_vote() for _ in range(3)), return_exceptions=True)
+        valid = [v for v in votes if isinstance(v, str) and v.strip()]
+        if not valid:
+            return action  # FAIL OPEN: no verdict must not veto the action
+        yes = sum(1 for v in valid if "yes" in v.strip().lower()[:20])
+        if yes * 2 > len(valid):  # ties resolve to reject — a wrong approve
+            return action          # mutates state; a missed one only asks again
+        logger.info(f"Approve action rejected by semantic verification ({yes}/{len(valid)} yes)")
+        return None
+
+    if act in ("revise", "improve"):
+        # Gate 1 — instruction vs exploration: models kept reading what-if
+        # questions and condition-dependent requests as change orders (two
+        # stubborn eval classes). Narrow check, majority of 3.
+        instr_q = (
+            f'The user\'s latest message in a project chat:\n"{user_msg}"\n\n'
+            "Is this message an INSTRUCTION to change something NOW, or a "
+            "QUESTION to answer first?\n"
+            "COUNTS as an instruction: a polite request phrased as a question "
+            '("can you add a section?", "ekler misin?"), an inclusive '
+            'imperative ("yapalım", "let\'s make it X"), a frustrated demand, '
+            "and a hedged message that still names a concrete shortcoming "
+            '("okay but the analysis feels shallow").\n'
+            "COUNTS as a question: a genuine information question, a what-if "
+            'exploration ("what would happen if..."), and a request that '
+            "depends on a condition nobody has checked yet "
+            '("if X is true, then approve/fix") — those deserve an answer '
+            "first, not an edit.\n"
+            "Answer with exactly one word: instruction or question."
+        )
+
+        async def _instr_vote() -> str:
+            return await call_llm(
+                messages=[{"role": "user", "content": instr_q}],
+                model_tier=3, temperature=0.7, max_tokens=10,
+                role="verify", think=False,
+            )
+
+        votes = await asyncio.gather(*(_instr_vote() for _ in range(3)), return_exceptions=True)
+        valid = [v for v in votes if isinstance(v, str) and v.strip()]
+        if valid:
+            question_votes = sum(1 for v in valid if "question" in v.strip().lower()[:24])
+            if question_votes * 2 > len(valid):
+                logger.info(
+                    f"{act} action deferred by verification — exploration, not instruction "
+                    f"({question_votes}/{len(valid)})"
+                )
+                return None
 
     if act == "revise":
         gate = current_gate_key(state)
         if not gate or action.get("target") == gate:
             return action
-        # Narrow multiple-choice: which document does the change belong to?
-        keys = ", ".join(DOC_PATHS)
+        # Gate 2 — target routing, multiple-choice. Options carry human names
+        # plus common synonyms (a glossary is context, not keyword matching —
+        # the model still decides); the gated doc is the default AND the
+        # primary when several documents are touched.
+        gloss = {
+            "prd": "Product Requirements Document — the product spec / requirements",
+            "devils_advocate": "Devil's Advocate Report — a REVIEW of the project content",
+            "consistency_report": "Consistency Report — a REVIEW of the project content",
+        }
+        options = "\n".join(f"- {k}: {gloss.get(k, DOC_TITLES.get(k, k))}" for k in DOC_PATHS)
         question = (
             f'The user\'s latest message in a project chat:\n"{user_msg}"\n\n'
             f'A change request must be routed to one document. The document '
             f'currently open for the user\'s review is "{gate}". Which document '
             f"does the user's request refer to? Unless they clearly named a "
-            f"different document, the answer is the open one. "
-            f"Answer with exactly one key from: {keys}"
+            f"different document, the answer is the open one. If the request "
+            f"touches SEVERAL documents and the open one is among them, answer "
+            f"with the open one (the other edits travel in the feedback). "
+            f"BUT if the open document is a review report and the user wants "
+            f"the project CONTENT it critiques changed, answer with that "
+            f"content document, not the report.\n\n"
+            f"Documents:\n{options}\n\nAnswer with exactly one key."
         )
         try:
             reply = await call_llm(
@@ -342,27 +412,56 @@ def apply_discussion_action(state: ProjectState, action: dict) -> dict | None:
     if act == "reopen":
         target = action.get("target")
         phase = state.get("current_phase")
-        if (
-            target in PHASE_DOC_KEYS.get(phase, ())
-            and get_doc(state, target)
-        ):
-            approved = [k for k in (state.get("approved_docs") or []) if k != target]
+        target_phase = next(
+            (p for p, keys in PHASE_DOC_KEYS.items() if target in keys), None
+        )
+        if not target_phase or not get_doc(state, target):
+            return None
+        order = ("discovery", "specification", "quality", "packaging", "completed")
+        if order.index(target_phase) > order.index(phase):
+            return None  # can't reopen a phase we haven't reached
+
+        approved = [k for k in (state.get("approved_docs") or []) if k != target]
+        base = {
+            **state,
+            "approved_docs": approved,
+            "current_agent": "orchestrator",
+            "pipeline_status": "running",
+            "pending_decision": doc_gate_card(
+                target, bool(extract_adjustments(get_doc(state, target)))
+            ),
+        }
+
+        if target_phase == phase:
             return {
-                **state,
-                "approved_docs": approved,
+                **base,
                 "messages": agent_message(
                     state, "orchestrator",
                     f"🔁 Reopened the {DOC_TITLES.get(target, target)} — it's in "
                     f"the files panel (`{DOC_PATHS.get(target, '')}`), unchanged. "
                     "Approve it, request changes, or ask to re-run it.",
                 ),
-                "current_agent": "orchestrator",
-                "pipeline_status": "running",
-                "pending_decision": doc_gate_card(
-                    target, bool(extract_adjustments(get_doc(state, target)))
-                ),
             }
-        return None
+
+        # Cross-phase rewind (product decision 2026-08-05): jump back to the
+        # target's phase. All documents and their approvals are KEPT — only the
+        # phase-level checkpoints from the target phase onward reset, so the
+        # pipeline re-presents each phase gate as it walks forward again.
+        rewind: dict = {}
+        for p in order[order.index(target_phase):]:
+            rewind.update(_PHASE_FLAG_RESETS.get(p, {}))
+        return {
+            **base,
+            **rewind,
+            "current_phase": target_phase,
+            "messages": agent_message(
+                state, "orchestrator",
+                f"⏪ Rewound to the {target_phase} phase and reopened the "
+                f"{DOC_TITLES.get(target, target)} (`{DOC_PATHS.get(target, '')}`). "
+                "Everything produced so far is preserved — after you re-approve, "
+                "the later phase gates will re-confirm on the way forward.",
+            ),
+        }
 
     if act == "revise":
         target = action.get("target")
