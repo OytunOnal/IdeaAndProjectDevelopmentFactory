@@ -214,13 +214,18 @@ async def _call_ollama_native(
     # Thinking tokens count against num_predict; without headroom the final
     # answer gets truncated away inside the reasoning.
     num_predict = max(max_tokens, 4096) if think else max_tokens
-    async with httpx.AsyncClient(timeout=600) as client:
+    async with httpx.AsyncClient(timeout=900) as client:
         resp = await client.post(f"{base}/api/chat", json={
             "model": model,
             "messages": messages,
             "think": think,
             "stream": False,
-            "options": {"temperature": temperature, "num_predict": num_predict},
+            # num_ctx: Ollama's default context window (~4k) silently truncates
+            # long-prompt + thinking runs — measured: 35B report calls returned
+            # empty content because thinking never fit. 16k covers the report
+            # agents' 12.5k-char doc context with thinking headroom.
+            "options": {"temperature": temperature, "num_predict": num_predict,
+                        "num_ctx": 16384},
         })
         resp.raise_for_status()
         return resp.json()["message"]["content"]
@@ -253,13 +258,14 @@ async def _stream_ollama_native(
     import json as _json
 
     base = settings.ollama_base_url.removesuffix("/v1")
-    async with httpx.AsyncClient(timeout=600) as client:
+    async with httpx.AsyncClient(timeout=900) as client:
         async with client.stream("POST", f"{base}/api/chat", json={
             "model": model,
             "messages": messages,
             "think": think,
             "stream": True,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "options": {"temperature": temperature, "num_predict": max_tokens,
+                        "num_ctx": 16384},
         }) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():

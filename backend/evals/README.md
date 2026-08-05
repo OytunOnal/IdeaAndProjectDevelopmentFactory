@@ -14,11 +14,10 @@ Evaluation assets for the agent pipeline. See the root `EVAL_PLAN.md` for the fu
 
 ## Status
 
-- [x] Step 0: golden intent fixtures
-- [ ] Step 0: `eval_runner.py` — wire fixtures to the discussion-intent classifier
-      (call the same code path `research_discussion` / `review_discussion` use,
-      with a mocked state built from each case's `context`)
-- [ ] Step 1+: see `EVAL_PLAN.md`
+- [x] Golden-intent fixtures (68 cases) + `eval_runner.py` — real code path, 9 runs across 6 configs
+- [x] Seeded-defect fixtures (15 defects, 2 projects) + `defect_runner.py` + human-judge protocol
+- [x] **`REPORT.md` — role × model matrix v1 and decisions** · full judge detail in `JUDGE_SCORES.md`
+- [ ] Next: DA prompt upgrade (absence-scan + evidence-verify) → re-measure; intent hardening → re-measure; spec-writer + judge meta-evals (`EVAL_PLAN.md` steps 2/4)
 
 ## Principles (short form)
 
