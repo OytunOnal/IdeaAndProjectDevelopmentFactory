@@ -81,7 +81,16 @@ IMPORTANT — intent rules (the user may write in any language, often Turkish; j
 - Conditional decisions ("if X holds, approve; otherwise fix it") → never guess the branch: check X against the documents, report what you found in plain text, and let the user decide.
 - When a message requests edits to MULTIPLE documents, set "target" to the document currently awaiting approval (if it is one of them) and fold the other documents' changes into the feedback so nothing is lost.
 - If the intent is genuinely ambiguous, ask one short clarifying question in plain text — never approve on an ambiguous message. Only answer in plain text when the user is asking a question.
-- If the message is unrelated to this project (small talk, random text, a different topic), take NO action and do not force a connection to the project — reply in one friendly sentence that you're focused on this project and point back to what's currently pending."""
+- If the message is unrelated to this project (small talk, random text, a different topic), take NO action and do not force a connection to the project — reply in one friendly sentence that you're focused on this project and point back to what's currently pending.
+- Choosing revise "target": it is the document the change BELONGS to — by default the document currently awaiting approval. NEVER route by topic keywords: a pricing complaint made while the GTM doc is gated targets gtm_strategy, NOT financial_model just because pricing sounds financial. Pick a different document only when the user names it.
+
+Calibration examples (message → action):
+- "lgtm 🚀" / "ship it" / "👍" / "onayldım dvm" / "aprove, next pls" → approve (casual, emoji-only, or typo'd approvals are still approvals)
+- "se ve muy bien, sigamos adelante" → approve (any language)
+- "eline sağlık çok güzel olmuş, devam edelim" → approve (praise WITH an explicit continue)
+- "vay be, sert eleştirmiş 😄" / "wow, it really tore the idea apart" → NO action, ask what they'd like to do (praise/commentary WITHOUT a decision is not an approval — the difference from the previous example is the missing "continue")
+- "şimdilik onaylama" / "don't approve it yet" → NO action; acknowledge you'll wait
+- "tamam da rakip analizi yüzeysel olmuş" → revise (a named shortcoming outweighs the "tamam")"""
 
 
 def parse_action(text: str) -> dict | None:
@@ -116,7 +125,7 @@ DOC_ALIASES = {
     "market_research": ("market", "pazar"),
     "competitor_analysis": ("competitor", "rakip"),
     "tech_feasibility": ("tech feasibility", "feasibility", "fizibilite"),
-    "prd": ("prd",),
+    "prd": ("prd", "spec'", "the spec", "specs"),
     "architecture": ("architecture", "mimari"),
     "ux_design": ("ux",),
     "gtm_strategy": ("gtm", "go-to-market"),
@@ -124,6 +133,91 @@ DOC_ALIASES = {
     "devils_advocate": ("devil", "şeytan"),
     "consistency_report": ("consistency", "tutarl"),
 }
+
+
+def _last_user_message(state: ProjectState) -> str:
+    for msg in reversed(state.get("messages") or []):
+        if msg.get("role") == "user":
+            return msg.get("content", "")
+    return ""
+
+
+async def verify_discussion_action(state: ProjectState, action: dict) -> dict | None:
+    """Semantic verification of high-stakes discussion actions.
+
+    Design decision (2026-08-05): keyword overrides were rejected — meaning is
+    expressed in unbounded ways and pattern lists are both brittle and prone to
+    eval-overfitting. Instead we exploit the MEASURED strength of small models:
+    they are weak at broad open-ended action parsing but near-frontier on
+    narrow, well-specified questions. So before applying a state-changing
+    action, we ask one narrow question about it. Local inference makes this
+    second call free.
+    """
+    from app.agents.llm import call_llm
+
+    act = action.get("action")
+    user_msg = _last_user_message(state)
+
+    if act == "approve":
+        # Narrow yes/no: is this a go-ahead? The policy definition lives here —
+        # casual forms COUNT as approvals; only no-decision or negated don't.
+        question = (
+            f'The user\'s latest message in a project chat:\n"{user_msg}"\n\n'
+            "Is this message a go-ahead to approve the current document and "
+            "continue NOW? Casual and short forms COUNT as approvals: a bare "
+            'thumbs-up emoji, "lgtm", "ship it", typo\'d approvals, and praise '
+            'that includes a continue ("çok güzel, devam edelim"). Answer no '
+            "ONLY when there is genuinely no go-ahead — pure commentary or "
+            'praise with no decision, a question, a conditional ("approve if"), '
+            'or a negated approval ("don\'t approve yet"). '
+            "Answer with exactly one word: yes or no."
+        )
+        try:
+            reply = await call_llm(
+                messages=[{"role": "user", "content": question}],
+                model_tier=3, temperature=0.0, max_tokens=10,
+                role="verify", think=False,  # narrow question — thinking only adds failure modes
+            )
+        except Exception:
+            return action  # verification unavailable → let the action stand
+        if not reply.strip():
+            return action  # FAIL OPEN: an empty verdict must not veto the action
+        if "yes" not in reply.strip().lower()[:20]:
+            logger.info("Approve action rejected by semantic verification")
+            return None
+        return action
+
+    if act == "revise":
+        gate = current_gate_key(state)
+        if not gate or action.get("target") == gate:
+            return action
+        # Narrow multiple-choice: which document does the change belong to?
+        keys = ", ".join(DOC_PATHS)
+        question = (
+            f'The user\'s latest message in a project chat:\n"{user_msg}"\n\n'
+            f'A change request must be routed to one document. The document '
+            f'currently open for the user\'s review is "{gate}". Which document '
+            f"does the user's request refer to? Unless they clearly named a "
+            f"different document, the answer is the open one. "
+            f"Answer with exactly one key from: {keys}"
+        )
+        try:
+            reply = await call_llm(
+                messages=[{"role": "user", "content": question}],
+                model_tier=3, temperature=0.0, max_tokens=20,
+                role="verify", think=False,
+            )
+        except Exception:
+            return action
+        chosen = [k for k in DOC_PATHS if k in reply.strip().lower()]
+        if len(chosen) == 1 and chosen[0] != action.get("target"):
+            logger.info(
+                f"Revise target corrected by verification: {action.get('target')} -> {chosen[0]}"
+            )
+            return {**action, "target": chosen[0]}
+        return action
+
+    return action
 
 _REOPEN_REQUEST = re.compile(
     r"(?i)go back to|return to|reopen|geri dön|geri don|adımına dön|adimina don"
@@ -193,9 +287,38 @@ def current_gate_key(state: ProjectState) -> str | None:
     return None
 
 
+# Negated-approve guard: local models (measured: qwen3:8b think-off) executed
+# the OPPOSITE of "don't approve yet". Critical intents live in code, not in
+# prompt-following — same principle as the rewrite/reopen shortcuts.
+# Conservative multilingual patterns; "(?<!why\s)" spares "why don't we
+# approve it?" which actually means approve.
+_NEGATED_APPROVE = re.compile(
+    r"(?i)(?:"
+    r"\bonaylamay?(?:a[lı]ım|ın)?\b|\bonay verme\b|approve\s*etmey?"  # TR
+    r"|(?<!why\s)(?:don'?t|do not|never)\s+(?:\w+\s+){0,2}approve"    # EN
+    r"|\bnot\s+approve\b|hold off on approv|wait (?:before|to) approv"
+    r"|no (?:lo )?apruebes|no aprobar"                                # ES
+    r"|nicht (?:genehmigen|freigeben)"                                # DE
+    r")"
+)
+
+
+def _approve_negated(state: ProjectState) -> bool:
+    """True if the last user message forbids approving right now."""
+    messages = state.get("messages") or []
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return bool(_NEGATED_APPROVE.search(msg.get("content", "")))
+    return False
+
+
 def apply_discussion_action(state: ProjectState, action: dict) -> dict | None:
     """Turn a discussion agent's action JSON into pipeline state, or None."""
     act = action.get("action")
+
+    if act == "approve" and _approve_negated(state):
+        logger.info("Approve action blocked by negation guard")
+        return None
 
     if act == "approve":
         target = action.get("target") or current_gate_key(state)

@@ -60,6 +60,28 @@ Baseline measurements that shaped this plan: `backend/evals/REPORT.md`
   banner where applicable, phase-based model batching (avoid 8B↔35B swap
   thrash on 6 GB), REPORT v3 with the full migration story in numbers.
 
+## Architecture revision (2026-08-05): semantic verification over keyword overrides
+
+First Phase-1 attempt used keyword layers (regex negation guard grown per eval
+failure, alias-based target override). Rejected on review: meaning is expressed
+in unbounded ways, pattern lists are brittle, and patterns derived from eval
+fixtures are eval-overfitting by construction. Replacement design:
+
+- **Narrow semantic verification** (`verify_discussion_action`): before a
+  state-changing action applies, one narrow question — "is this an EXPLICIT
+  approval? yes/no", "which document does this change belong to?
+  (multiple-choice, the gated doc is the default)". This exploits the measured
+  asymmetry: small models are weak at broad open-ended action parsing (27-51%)
+  but near-frontier on narrow well-specified questions (85%+). Local inference
+  makes the second call free.
+- The negation regex remains only as a **frozen veto seatbelt** (asymmetric
+  failure cost: a missed pattern = no worse than before; a false block = minor
+  friction). It is not grown per eval failure.
+- **Confirmation-card UX** for chat-initiated approvals is the third layer
+  (frontend work, queued): the HITL architecture is itself the strongest guard.
+- The durable fix remains **distillation** (Phase 4): teach the behavior
+  instead of fencing it.
+
 ## Hardware honesty
 
 On the current 6 GB-VRAM machine, 35B stays hybrid and slow and shows

@@ -24,6 +24,7 @@ from app.agents.common import (
     prior_adjustments_blocklist,
     reopen_request_shortcut,
     rewrite_request_shortcut,
+    verify_discussion_action,
 )
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
@@ -340,8 +341,12 @@ async def review_discussion_node(state: ProjectState) -> ProjectState:
         logger.error(f"Review discussion failed: {e}")
         answer = f"I couldn't reach the AI model: {e}"
 
-    # The agent may respond with an action instead of an answer
+    # The agent may respond with an action instead of an answer.
+    # State-changing actions pass a narrow semantic verification first
+    # (small models: weak at broad parsing, strong at narrow questions).
     action = parse_action(answer)
+    if action:
+        action = await verify_discussion_action(state, action)
     if action:
         applied = apply_discussion_action(state, action)
         if applied:

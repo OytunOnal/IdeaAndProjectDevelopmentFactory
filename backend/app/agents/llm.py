@@ -142,14 +142,17 @@ async def call_llm(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     role: str | None = None,
+    think: bool | None = None,
 ) -> str:
     """Make a non-streaming LLM call with automatic fallback.
 
     Tries the resolved provider first. On failure (rate limit, no credits, etc.)
     falls back to the next available provider. `role` engages the per-role
-    routing map (see LOCAL_MIGRATION_PLAN.md).
+    routing map (see LOCAL_MIGRATION_PLAN.md). `think` explicitly overrides
+    thinking for this call (precedence: param > role map > env > tier).
     """
-    think = _role_think_for(role)
+    if think is None:
+        think = _role_think_for(role)
 
     # If user provided a specific key, try that first then fall back
     if api_key and api_key.strip():
