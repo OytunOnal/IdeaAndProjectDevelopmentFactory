@@ -23,9 +23,9 @@ from app.agents.common import brief_context, docs_context, prior_adjustments_blo
 from app.agents.llm import call_llm
 from app.agents.specification import SPEC_AGENTS
 from app.config import settings
-from evals.defect_runner import BRIEFS, PROJECTS
+from evals.defect_runner import BRIEFS, FIXTURES_ROOT, SETS
 
-FIXTURES = Path(__file__).parent / "fixtures" / "seeded_defects"
+FIXTURES = FIXTURES_ROOT / "seeded_defects"  # dev set (back-compat alias)
 RESULTS = Path(__file__).parent / "results" / "generators"
 
 INPUT_KEYS = (
@@ -56,13 +56,13 @@ def structure_score(doc_key: str, text: str) -> dict:
     }
 
 
-def build_state(project: str) -> dict:
+def build_state(project: str, fixtures: Path = FIXTURES) -> dict:
     state: dict = {
         "project_name": project,
         "idea_brief": BRIEFS[project],
     }
     for key in INPUT_KEYS:
-        path = FIXTURES / project / f"{key}.md"
+        path = fixtures / project / f"{key}.md"
         if path.exists():
             state[key] = path.read_text(encoding="utf-8")
     return state
@@ -76,10 +76,10 @@ def model_label() -> str:
     return "frontier"
 
 
-async def generate_one(project: str, agent_id: str) -> None:
+async def generate_one(project: str, agent_id: str, fixtures: Path = FIXTURES) -> None:
     spec = SPEC_AGENTS[agent_id]
     doc_key = spec["output_key"]
-    state = build_state(project)
+    state = build_state(project, fixtures)
     user_content = (
         f"{brief_context(state)}\n\n---\n\n{docs_context(state, spec['context'])}\n\n---\n\n"
         f"Write the {spec['title']} for this project now."
@@ -118,16 +118,26 @@ async def generate_one(project: str, agent_id: str) -> None:
 
 
 async def main() -> None:
+    all_projects = [p for s in SETS.values() for p in s["projects"]]
     ap = argparse.ArgumentParser()
-    ap.add_argument("--project", choices=[*PROJECTS, "both"], default="both")
+    ap.add_argument("--set", choices=list(SETS), default="dev",
+                    help="heldout is SEALED — read fixtures/heldout_defects/HELDOUT.md first")
+    ap.add_argument("--project", choices=[*all_projects, "both"], default="both")
     ap.add_argument("--agent", choices=[*SPEC_AGENTS, "all"], default="all")
     args = ap.parse_args()
-    projects = PROJECTS if args.project == "both" else (args.project,)
+    fixtures = FIXTURES_ROOT / SETS[args.set]["dir"]
+    set_projects = SETS[args.set]["projects"]
+    if args.project == "both":
+        projects = set_projects
+    elif args.project in set_projects:
+        projects = (args.project,)
+    else:
+        raise SystemExit(f"--project {args.project} is not in set '{args.set}' {set_projects}")
     agents = list(SPEC_AGENTS) if args.agent == "all" else [args.agent]
     runs = [(p, a) for p in projects for a in agents]
-    print(f"model={model_label()}  generations={len(runs)}")
+    print(f"set={args.set}  model={model_label()}  generations={len(runs)}")
     for p, a in runs:
-        await generate_one(p, a)
+        await generate_one(p, a, fixtures)
     print("Done —", RESULTS / model_label())
 
 

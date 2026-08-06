@@ -1,0 +1,181 @@
+# HELD-OUT seeded-defect manifest — see HELDOUT.md for the seal protocol.
+#
+# Same format as the dev set (seeded_defects/manifest.yaml). The type,
+# severity, and expected_agent DISTRIBUTION mirrors the dev set exactly
+# (so scores are comparable), but every defect is a fresh manifestation
+# in two new domains (consumer edtech with minor users; P2P marketplace).
+#
+# Type coverage (mirrors dev): internal-contradiction ×2, fabricated-evidence ×2,
+# arithmetic-error ×1, cross-doc-inconsistency ×2, infeasible-tech ×1,
+# missing-critical ×2, out-of-scope-reference ×1, absurd-target ×1,
+# impossible-math ×1, audience-mismatch ×1, infeasible-plan ×1.
+# Severity: 8 obvious / 7 subtle (same as dev).
+
+# ═══════════ PrepNest ═══════════
+
+- id: C1-free-session-contradiction
+  project: prepnest
+  doc: prd
+  type: internal-contradiction
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "2. Booked micro-sessions — 15-minute 1-on-1 video help on a single stuck concept; Plus plan includes 3 sessions per month"
+    replace: "2. Booked micro-sessions — 15-minute 1-on-1 video help on a single stuck concept; unlimited sessions included on every plan, Free included"
+  detection: Flags that the features section claims unlimited sessions on every plan while the pricing section caps Free at 1 session/month and Plus at 3 included.
+
+- id: C2-fabricated-school-pilot
+  project: prepnest
+  doc: gtm_strategy
+  type: fabricated-evidence
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "3. **School ambassadors** — teachers get a free classroom dashboard in exchange for intro sessions at study halls."
+    replace: "3. **School ambassadors** — teachers get a free classroom dashboard in exchange for intro sessions at study halls. Our pilot with 3 partner schools reached 61% weekly active usage, so the channel is already proven."
+  detection: Questions the unsupported 3-school/61% pilot claim (no such pilot exists; the launch plan says school outreach only begins in month 2).
+
+- id: C3-ltv-cac-math
+  project: prepnest
+  doc: financial_model
+  type: arithmetic-error
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "- **LTV:** $144 (≈ $9 contribution × 16-month lifetime)\n- **LTV:CAC ≈ 5.8 : 1** — comfortably above the 3:1 threshold"
+    replace: "- **LTV:** $30\n- **LTV:CAC ≈ 5.8 : 1** — comfortably above the 3:1 threshold"
+  detection: Notes that LTV $30 against CAC $25 cannot yield 5.8:1 (the ratio is ~1.2:1; the comfortably-above-3:1 claim is false).
+
+- id: C4-arpu-price-mismatch
+  project: prepnest
+  doc: financial_model
+  type: cross-doc-inconsistency
+  severity: subtle
+  expected_agent: consistency
+  patch:
+    find: "- **ARPU:** $19/month"
+    replace: "- **ARPU:** $34/month"
+  detection: Flags the $34 ARPU against the $19 Plus price stated in the PRD (and in the model's own revenue-assumptions line).
+
+- id: C5-ondevice-70b
+  project: prepnest
+  doc: architecture
+  type: infeasible-tech
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "- **Video sessions** — LiveKit WebRTC rooms; recordings retained 90 days for safeguarding review"
+    replace: "- **Video sessions** — LiveKit WebRTC rooms; recordings retained 90 days for safeguarding review\n- **Offline explainer** — runs a proprietary 70B-parameter tutoring LLM fully on-device on students' phones so explanations work with no connection"
+  detection: Challenges running a 70B LLM on-device on students' phones as technically infeasible (memory/compute orders of magnitude beyond phone hardware).
+
+- id: C6-safeguarding-removed
+  project: prepnest
+  doc: prd
+  type: missing-critical
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "## Safeguarding & minors' privacy\nUsers are minors. v1 ships with: verified parental consent at signup, background-checked tutors only, all sessions recorded and retained 90 days for review, in-session reporting button, no direct-message channel outside booked sessions, and GDPR-K/COPPA-aligned data handling.\n\n"
+    replace: ""
+  detection: Raises the absence of any safeguarding/parental-consent/minor-privacy treatment despite the product putting minors in 1-on-1 video sessions with adults.
+
+- id: C7-group-rooms-scope
+  project: prepnest
+  doc: ux_design
+  type: out-of-scope-reference
+  severity: subtle
+  expected_agent: consistency
+  patch:
+    find: "4. **Post-session recap** — tutor leaves a 3-line summary + suggested practice set; parent gets a weekly digest."
+    replace: "4. **Post-session recap** — tutor leaves a 3-line summary + suggested practice set; parent gets a weekly digest.\n5. **Group study rooms** — live rooms where up to 30 students join a shared whiteboard session before big exam dates."
+  detection: Notes the UX specifies a group-study-room flow that the PRD explicitly scopes OUT of v1.
+
+- id: C8-absurd-target
+  project: prepnest
+  doc: gtm_strategy
+  type: absurd-target
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "- 6,000 registered / 700 paying subscribers by month 12\n- Blended CAC under $25 by month 6"
+    replace: "- 2 million paying subscribers by month 4 with zero marketing spend\n- Blended CAC under $25 by month 6"
+  detection: Calls out 2M paying subscribers in 4 months with zero marketing spend as unrealistic.
+
+# ═══════════ KilnShare ═══════════
+
+- id: D1-cash-only-contradiction
+  project: kilnshare
+  doc: architecture
+  type: internal-contradiction
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "- **Payments** — Payments run through **Stripe Connect**: the renter is charged at booking, funds are held in escrow, the damage deposit auto-releases 48 hours after a dispute-free return, and the owner payout settles daily."
+    replace: "- **Payments** — The platform is **cash-only by design — no online payment processing whatsoever**: renters pay owners in person at pickup, while the damage deposit auto-releases 48 hours after a dispute-free return and the owner payout settles daily."
+  detection: Flags that a cash-only/no-payment-processing platform cannot simultaneously hold deposits in escrow, auto-release them, and settle daily payouts.
+
+- id: D2-fabricated-beta-fleet
+  project: kilnshare
+  doc: gtm_strategy
+  type: fabricated-evidence
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "4. **Maker creators** — Instagram/YouTube build-video sponsorships; every rented tool tagged #kilnshare in the final cut"
+    replace: "4. **Maker creators** — Instagram/YouTube build-video sponsorships; every rented tool tagged #kilnshare in the final cut\n\nOur 40-owner beta fleet in Austin sustained 78% monthly utilization, which anchors every partner pitch."
+  detection: Questions the 40-owner/78%-utilization beta claim (no beta exists; the launch plan shows supply seeding hasn't started yet).
+
+- id: D3-churn-math
+  project: kilnshare
+  doc: financial_model
+  type: impossible-math
+  severity: obvious
+  expected_agent: either
+  patch:
+    find: "- **Monthly renter churn: 8%** → average active lifetime ≈ 12.5 months → **~37% of renters retained after 12 months**"
+    replace: "- **Monthly renter churn: 12%** → average active lifetime ≈ 25 months → **~85% of renters retained after 12 months**"
+  detection: Notes that 12% monthly churn is mathematically incompatible with a 25-month lifetime and ~85% annual retention (12% monthly implies ~8-month lifetime and ~22% retained).
+
+- id: D4-sftp-audience
+  project: kilnshare
+  doc: ux_design
+  type: audience-mismatch
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "3. **Owner listing** — A guided three-step listing wizard (photos → availability → house rules) gets an owner live in under ten minutes."
+    replace: "3. **Owner listing** — Listings are created exclusively by uploading YAML files over SFTP with no web form — ideal for our craft-hobbyist owner audience."
+  detection: Challenges YAML-over-SFTP-only listing creation as contradictory for a craft-hobbyist owner audience (and inconsistent with the effortless-listing philosophy elsewhere).
+
+- id: D5-take-rate-mismatch
+  project: kilnshare
+  doc: gtm_strategy
+  type: cross-doc-inconsistency
+  severity: subtle
+  expected_agent: consistency
+  patch:
+    find: "at the standard **15% take rate** (10% renter + 5% owner, aligned with the PRD)"
+    replace: "at a **25% take rate** (18% renter + 7% owner)"
+  detection: Flags the 25% GTM take rate against the 15% take rate in the PRD and financial model.
+
+- id: D6-liability-removed
+  project: kilnshare
+  doc: prd
+  type: missing-critical
+  severity: subtle
+  expected_agent: da
+  patch:
+    find: "## Damage protection & liability\nDangerous equipment changes hands here; this section is load-bearing. v1 ships with: damage protection up to **$2,500 per booking** funded by the protection fee, a signed liability waiver in the booking flow, the safety-certification gate for kiln/laser categories, and a photo-documented handover checklist that anchors dispute resolution.\n\n"
+    replace: ""
+  detection: Raises the absence of any damage-protection/liability/waiver treatment despite the platform brokering rentals of dangerous equipment (kilns, lasers).
+
+- id: D7-intern-microservices
+  project: kilnshare
+  doc: architecture
+  type: infeasible-plan
+  severity: obvious
+  expected_agent: da
+  patch:
+    find: "Two engineers, 3.5 months to v1: month 1 listings + booking calendar, month 2 Stripe Connect escrow + identity verification, month 3 messaging + reviews, final two weeks hardening and supply-side onboarding."
+    replace: "A single part-time intern will deliver the full two-sided marketplace — escrow payments, identity verification, safety gating, messaging, reviews, and dispute resolution — as twelve event-sourced microservices within 5 weeks."
+  detection: Challenges one part-time intern shipping a full marketplace as twelve microservices in five weeks as an unrealistic plan (and/or questions microservices for a v1 of this size).
