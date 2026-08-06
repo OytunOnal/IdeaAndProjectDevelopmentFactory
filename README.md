@@ -9,7 +9,7 @@ quality-scored project specification — with a human in the loop at every gate.
 [![FastAPI](https://img.shields.io/badge/FastAPI-Python_3.13-009688?logo=fastapi&logoColor=white)](backend)
 [![LangGraph](https://img.shields.io/badge/LangGraph-14_live_agents-1C3C3C)](backend/app/agents)
 [![Claude API](https://img.shields.io/badge/Claude-web__search_grounding-D97757?logo=anthropic&logoColor=white)](backend/app/agents/research.py)
-[![Local-first](https://img.shields.io/badge/Ollama-chat_layer_local_·_90%25_vs_frontier_87%25-4B5563?logo=ollama&logoColor=white)](LOCAL_MIGRATION_PLAN.md)
+[![Local-first](https://img.shields.io/badge/Ollama-chat_%2B_spec_generation_local_·_eval--gated-4B5563?logo=ollama&logoColor=white)](LOCAL_MIGRATION_PLAN.md)
 [![CI](https://github.com/OytunOnal/IdeaAndProjectDevelopmentFactory/actions/workflows/ci.yml/badge.svg)](https://github.com/OytunOnal/IdeaAndProjectDevelopmentFactory/actions)
 
 <img src="docs/screenshot.png" alt="ProjectFactory workspace" width="850">
@@ -76,15 +76,21 @@ Every agent role is being migrated to **local models (Ollama)** — but only
 after it clears a measuring harness. The evals came first, the migration
 decisions fell out of the numbers:
 
-| Config | Intent role (68-case golden set) | Adversarial-review role (15 seeded defects) |
-|---|---|---|
-| Frontier API (fallback chain) | 87% | 77% → **100%** after a measured prompt upgrade* |
-| **qwen3:8b, thinking on — now runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | 27% → 57%* — stays frontier |
-| qwen3.6:35b, thinking on | 81% | ~50%, unstable empty-output — stays frontier |
-| deepseek-r1:7b | 51% | 3% — "reasoning model ⇒ good reviewer" falsified |
+| Config | Intent role (68-case golden set) | Generator roles (10 spec docs, fixed-context, judged) | Adversarial-review role (15 seeded defects) |
+|---|---|---|---|
+| Frontier API (fallback chain) | 87% | strongest breadth (14-story PRDs) | 77% → **100%** after a measured prompt upgrade* |
+| **qwen3:8b, thinking on — runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | unfit: arithmetic incoherence in the financial model, fabricated a cited stat | 27% → 57%* — stays frontier |
+| **qwen3.6:35b, thinking on — runs the 5 spec generators** | 81% | **at/near frontier parity**; best-in-eval financial model (only fully consistent numeric chain) | ~50%, unstable empty-output — stays frontier |
+| deepseek-r1:7b | 51% | unfit: generic, ungrounded output | 3% — "reasoning model ⇒ good reviewer" falsified |
 
 <sub>*development-set numbers — the prompts were tuned against these fixtures;
 a held-out set decides any general claim. The caveat is stamped in the reports.</sub>
+
+Two lessons the generator eval taught: **verdicts are per-role, not per-model**
+(the intent winner, 8B, fails financial arithmetic; the intent runner-up, 35B,
+writes the best financial model) — and **infrastructure can masquerade as model
+weakness** (35B's one bad document was a token-cap truncation, cured by raising
+the generation budget, not by changing models).
 
 What made the local chat layer reach (and pass) frontier parity is a
 **semantic verification stack**, not keyword rules: before a state-changing
@@ -121,15 +127,20 @@ This project demonstrates, in working code:
   state-changing actions pass **narrow semantic verification** (majority-voted
   go-ahead check, instruction-vs-question gate, glossary-assisted target
   routing) before they touch state ([common.py](backend/app/agents/common.py))
-- **Per-role model routing** — each role can run on a different provider
-  (`LLM_ROLE_PROVIDERS=discussion=ollama`), with per-role thinking control,
+- **Per-role model routing** — each role can run on a different provider, and
+  a role can pin a specific local model
+  (`LLM_ROLE_PROVIDERS=discussion=ollama,spec=ollama:quality` — because eval
+  verdicts are per-model, not per-tier), with per-role thinking control,
   force/fallback precedence, and Ollama-specific reliability engineering
   (native-API thinking control, context-window and empty-output handling —
   each one a measured failure mode) ([llm.py](backend/app/agents/llm.py))
 - **Evaluation harnesses as first-class code** — a 68-case golden-intent set
-  driven through the real code path, and a seeded-defect eval (15 planted
+  driven through the real code path, a seeded-defect eval (15 planted
   flaws across two fictional projects, recall + false-positive scored under a
-  written judging protocol) ([backend/evals/](backend/evals/))
+  written judging protocol), and a fixed-context generator eval (every model
+  writes each spec document from the same golden inputs, so per-role quality
+  is isolated from chained error compounding; outputs judged for grounding,
+  depth, and arithmetic coherence) ([backend/evals/](backend/evals/))
 - **Auditable LLM-as-judge** — the quality score is rubric-versioned (stamped
   in code, so a rubric edit can't silently re-rate old packages) and every
   deduction must cite the rubric line plus a quoted span from the document
@@ -190,13 +201,15 @@ pipeline. Export the ZIP from the file tree when it completes.
 |---|---|---|
 | Free providers only | Knowledge-based estimates, flagged as such | **$0** |
 | + `ANTHROPIC_API_KEY` | Live web search, cited sources | ~$0.20 (Haiku) |
-| + Ollama (optional) | Chat/intent layer runs **on your machine** — deterministic, rate-limit-free, private | $0 |
+| + Ollama (optional) | Chat/intent layer **and the 5 spec generators** run **on your machine** — rate-limit-free, private | $0 |
 
 Everything except research runs on free-tier providers either way. With
-[Ollama](https://ollama.com) installed and `qwen3:8b` pulled, the
-`.env.example` routing lines put the conversation layer on local inference
-(measured at 90% vs the frontier chain's 87% on the intent set), with the
-frontier chain as automatic fallback.
+[Ollama](https://ollama.com) installed, the `.env.example` routing lines move
+work to local inference with the frontier chain as automatic fallback:
+`qwen3:8b` runs the conversation layer (measured at 90% vs the frontier
+chain's 87% on the intent set), and `qwen3.6:35b` runs the five spec
+generators (judged at/near frontier parity — expect ~3–4 min per document on
+consumer hardware vs seconds via API).
 
 ## Repository layout
 
@@ -210,8 +223,8 @@ frontier chain as automatic fallback.
 │   │   └── graph.py        StateGraph wiring + SQLite checkpointing
 │   ├── app/routers/        REST API (projects, pipeline, files, export)
 │   ├── app/websocket/      live progress channel
-│   ├── evals/              golden-intent + seeded-defect harnesses, fixtures,
-│   │                       judging protocol, REPORT.md / JUDGE_SCORES.md
+│   ├── evals/              golden-intent + seeded-defect + generator harnesses,
+│   │                       fixtures, judging protocol, REPORT.md / JUDGE_SCORES.md
 │   └── tests/              pipeline flow + guard tests (mocked LLMs) — no keys needed
 ├── frontend/               Next.js 16 + TypeScript + Tailwind + Shadcn/UI
 │   └── src/                workspace: chat + decision cards, file tree, viewer
@@ -245,8 +258,9 @@ against Ollama or the frontier chain and write scored JSON reports.
   any general claim; known remaining classes ("the spec"→PRD mapping,
   conditional branch-guessing, multi-document edits in one message) are parked
   for distillation or feature work rather than more prompt surgery.
-- Only the discussion/intent role runs local so far; generator and reviewer
-  roles measured below the bar and stay on the frontier chain
+- The discussion/intent role and the five spec generator roles run local;
+  the reviewer roles (adversarial review, consistency, LLM-judge) measured
+  below the bar and stay on the frontier chain
   ([REPORT.md](backend/evals/REPORT.md) has the numbers and why).
 - Free-tier rate limits are real: context windows sent to quality agents are
   truncated to fit Groq's 6k TPM; a paid key removes the constraint.
