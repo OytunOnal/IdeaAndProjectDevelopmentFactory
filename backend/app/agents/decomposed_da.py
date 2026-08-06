@@ -241,6 +241,235 @@ async def numeric_audit(
     return findings
 
 
+# ── pass 2: evidence-source matching ───────────────────────────────────────
+#
+# Targets fabricated first-party evidence ("our 200-freelancer beta converted
+# at 34%") — the most dangerous measured local-model failure class, and one
+# the dev-set DA prompt upgrade showed even frontier needs explicit duties
+# for. Narrow extraction lists the claims; a narrow per-claim verification
+# question checks them against the project's other documents. External
+# benchmarks ("industry range 2-10%") are out of scope by design — they are
+# not verifiable inside the bundle and extracting them would only buy FPs.
+
+_EVIDENCE_EXTRACT_PROMPT = """You are an evidence-claims extractor. You do NOT judge claims — you only list them. A separate check verifies each one.
+
+From the document below, extract every FIRST-PARTY empirical claim: a statement that this project's own pilot, beta, test, launch, or measurement has ALREADY HAPPENED and produced results. Signals: "our pilot/beta/test", past-tense results ("converted at", "cut costs by", "achieved", "sustained"), specific counts of the project's own users/customers/partners presented as accomplished fact.
+
+Do NOT extract:
+- industry benchmarks or third-party statistics ("industry range 2-10%", "the market spends $X")
+- targets, plans, and projections ("we will reach", "month-12 target", "expected to")
+- product descriptions and feature statements
+
+Rules:
+- "quote": copy the claiming sentence VERBATIM from the document.
+- "asserts": one short sentence stating what evidence the claim presupposes exists.
+
+Worked examples — extracted vs NOT extracted:
+- "Our closed beta of 120 users converted at 22%" → EXTRACT (past result asserted as fact)
+- "Month 1-2: closed list of 40 users from communities, weekly feedback loop" → do NOT extract (a launch-phase PLAN, nothing has happened yet)
+- "Month-12 target: 500 paying users → $6,000 MRR" → do NOT extract (a target)
+- "LTV:CAC ≈ 4 : 1 — healthy" → do NOT extract (a computation, not an empirical event)
+- "costs cross MRR at roughly month 13 at current assumptions" → do NOT extract (a projection)
+
+Respond with ONLY a fenced JSON array (no commentary):
+```json
+[{"quote": "...", "asserts": "a 200-freelancer closed beta was run and converted at 34%"}]
+```
+If the document contains no first-party empirical claims, respond with an empty array."""
+
+_EVIDENCE_CLASSIFY_PROMPT = """Answer one narrow question about one sentence from a project document.
+
+Sentence: "{quote}"
+
+Does this sentence assert that an event ALREADY HAPPENED and produced measured results (a completed pilot/beta/test/launch with numbers)? Plans, launch-phase descriptions, targets, projections, and computed metrics are NOT completed events.
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"completed_claim": true/false}}
+```"""
+
+_EVIDENCE_VERIFY_PROMPT = """You verify one claim against a project's source documents. Answer ONLY from the sources given — no outside knowledge, no charity.
+
+The claim (from {claim_doc}) presupposes: {asserts}
+Claim text: "{quote}"
+
+Question: do the sources explicitly state that this event/result has actually happened (not merely planned, proposed, or targeted)? A plan to run a pilot does NOT support a claim that a pilot produced results.
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"supported": true/false, "source": "<doc key that states it, or \\"none\\">"}}
+```"""
+
+
+def _parse_json_object(reply: str) -> dict | None:
+    text = reply
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        text = m.group(1)
+    else:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        text = m.group(0) if m else text
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_verdict(reply: str) -> dict | None:
+    """Verdict object with a boolean 'supported' field, or None."""
+    data = _parse_json_object(reply)
+    return data if data is not None and isinstance(data.get("supported"), bool) else None
+
+
+def _parse_verdict_key(reply: str, key: str) -> bool | None:
+    """A single boolean field from a JSON verdict, or None if unparseable."""
+    data = _parse_json_object(reply)
+    value = data.get(key) if data else None
+    return value if isinstance(value, bool) else None
+
+
+def merge_evidence_votes(verdicts: list[dict | None]) -> bool:
+    """True → flag as unsupported. Majority of valid votes, ties withhold.
+
+    Unanimity was tried first and proved fragile: a single noisy "supported"
+    vote vetoed a real finding (measured — the A2 fabricated-beta claim was
+    extracted, gated in, then lost at verify). Majority absorbs single-vote
+    noise in both directions — the Phase 1 self-consistency rule applied
+    here. No valid votes → no finding (an empty verdict must not manufacture
+    one)."""
+    valid = [v for v in verdicts if v is not None]
+    unsupported = sum(1 for v in valid if not v["supported"])
+    return unsupported * 2 > len(valid)
+
+
+async def evidence_audit(
+    docs: dict[str, str],
+    audit_keys: tuple[str, ...] | None = None,
+    samples: int = 3,
+    votes: int = 3,
+    stats: dict | None = None,
+) -> list[dict]:
+    """Run the evidence micro-pass: extract first-party empirical claims from
+    the audited docs, verify each against ALL other docs in the bundle.
+
+    Pass a dict as `stats` to receive per-stage counts (extracted → gated →
+    flagged) — without it, a zero-finding run is indistinguishable from a
+    run whose extraction silently returned nothing.
+    """
+    audit_keys = audit_keys or tuple(docs)
+    claims: list[dict] = []
+    seen_quotes: set[str] = set()
+    for doc_key in audit_keys:
+        doc_text = docs.get(doc_key) or ""
+        if not doc_text.strip():
+            continue
+        for _ in range(samples):
+            try:
+                reply = await call_llm(
+                    messages=[
+                        {"role": "system", "content": _EVIDENCE_EXTRACT_PROMPT},
+                        {"role": "user", "content": f"Document ({doc_key}):\n\n{doc_text}"},
+                    ],
+                    model_tier=2,
+                    temperature=0.3,
+                    max_tokens=1536,
+                    role="audit",
+                    think=False,
+                )
+            except Exception as e:
+                logger.warning(f"evidence_audit extraction failed for {doc_key}: {e}")
+                continue
+            for item in _parse_items(reply):
+                quote = item.get("quote", "")
+                if not quote or not item.get("asserts"):
+                    continue
+                if _normalize_ws(quote) not in _normalize_ws(doc_text):
+                    logger.debug(f"evidence_audit: quote not in doc, rejected: {quote!r}")
+                    continue
+                key = _normalize_ws(quote).lower()
+                # containment dedupe: a shorter/longer variant of an already-
+                # extracted quote is the same claim
+                if any(key in s or s in key for s in seen_quotes):
+                    continue
+                seen_quotes.add(key)
+                claims.append({"doc": doc_key, "quote": quote, "asserts": item["asserts"]})
+
+    # classification gate: only claims that narrowly classify as
+    # completed-result assertions proceed (the broad extractor over-extracts
+    # plans/targets — the distinction is delegated to a narrow question,
+    # mirroring the Phase 1 instruction-vs-question gate)
+    gated: list[dict] = []
+    for claim in claims:
+        votes_c: list[bool] = []
+        for _ in range(votes):
+            try:
+                reply = await call_llm(
+                    messages=[{
+                        "role": "user",
+                        "content": _EVIDENCE_CLASSIFY_PROMPT.format(quote=claim["quote"]),
+                    }],
+                    model_tier=2,
+                    temperature=0.3,
+                    max_tokens=256,
+                    role="audit",
+                    think=False,
+                )
+                verdict = _parse_verdict_key(reply, "completed_claim")
+                if verdict is not None:
+                    votes_c.append(verdict)
+            except Exception as e:
+                logger.warning(f"evidence_audit classify failed: {e}")
+        if votes_c and sum(votes_c) * 2 > len(votes_c):  # majority, ties drop
+            gated.append(claim)
+        else:
+            logger.debug(f"evidence_audit: gated out (not a completed claim): {claim['quote']!r}")
+
+    findings: list[dict] = []
+    for claim in gated:
+        sources = "\n\n".join(
+            f"=== {key} ===\n{text[:4000]}"
+            for key, text in docs.items()
+            if key != claim["doc"] and text and text.strip()
+        )
+        prompt = _EVIDENCE_VERIFY_PROMPT.format(
+            claim_doc=claim["doc"], asserts=claim["asserts"], quote=claim["quote"]
+        )
+        verdicts: list[dict | None] = []
+        for _ in range(votes):
+            try:
+                reply = await call_llm(
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": f"Sources:\n\n{sources}"},
+                    ],
+                    model_tier=2,
+                    temperature=0.3,
+                    max_tokens=512,
+                    role="audit",
+                    think=False,
+                )
+                verdicts.append(_parse_verdict(reply))
+            except Exception as e:
+                logger.warning(f"evidence_audit verify failed: {e}")
+                verdicts.append(None)
+        if merge_evidence_votes(verdicts):
+            findings.append({
+                "kind": "unsupported-evidence",
+                "doc": claim["doc"],
+                "quote": claim["quote"],
+                "asserts": claim["asserts"],
+            })
+    if stats is not None:
+        stats.update({
+            "claims_extracted": len(claims),
+            "claims_gated_in": len(gated),
+            "findings": len(findings),
+            "extracted_quotes": [c["quote"][:90] for c in claims],
+        })
+    return findings
+
+
 def format_numeric_findings(findings: list[dict]) -> str:
     """Render findings in the DA report's evidence-first style."""
     if not findings:

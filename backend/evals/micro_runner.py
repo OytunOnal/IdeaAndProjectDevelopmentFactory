@@ -19,26 +19,38 @@ from pathlib import Path
 
 import yaml
 
-from app.agents.decomposed_da import numeric_audit
+from app.agents.decomposed_da import evidence_audit, numeric_audit
 from evals.defect_runner import FIXTURES_ROOT, SETS, load_bundle, model_label
 
 RESULTS = Path(__file__).parent / "results" / "micro"
 
-PASSES = {
-    "numeric": numeric_audit,
-}
+RESEARCH_KEYS = ("market_research", "competitor_analysis", "tech_feasibility")
+
+PASSES = ("numeric", "evidence")
 
 # Defect types each pass is RESPONSIBLE for (recall is scored against these
 # only; other defect types are other passes' jobs).
 PASS_SCOPE = {
     "numeric": ("arithmetic-error", "impossible-math"),
+    "evidence": ("fabricated-evidence",),
 }
 
 
 async def run_one(pass_name: str, project: str, variant: str, manifest: list[dict], fixtures: Path) -> dict:
     docs = load_bundle(project, variant, manifest, fixtures)
     t0 = time.perf_counter()
-    findings = await PASSES[pass_name](docs)
+    stats: dict = {}
+    if pass_name == "evidence":
+        # research docs join the bundle as verification sources; only the
+        # spec docs (the defect surface) are audited for claims
+        research = {
+            key: path.read_text(encoding="utf-8")
+            for key in RESEARCH_KEYS
+            if (path := fixtures / project / f"{key}.md").exists()
+        }
+        findings = await evidence_audit({**research, **docs}, audit_keys=tuple(docs), stats=stats)
+    else:
+        findings = await numeric_audit(docs)
     seconds = round(time.perf_counter() - t0, 1)
 
     in_scope = [
@@ -49,6 +61,7 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
         "pass": pass_name, "project": project, "variant": variant,
         "model_label": model_label(), "seconds": seconds,
         "findings": findings,
+        "stage_stats": stats or None,
         "in_scope_defects": [d["id"] for d in in_scope] if variant == "defected" else [],
     }
     outdir = RESULTS / model_label()
@@ -56,9 +69,13 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
     stem = f"{pass_name}_{project}_{variant}"
     (outdir / f"{stem}.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    print(f"  [{model_label()}] {stem}: {len(findings)} findings in {seconds}s")
+    stage = f"  [extracted {stats['claims_extracted']} → gated {stats['claims_gated_in']}]" if stats else ""
+    print(f"  [{model_label()}] {stem}: {len(findings)} findings in {seconds}s{stage}")
     for f in findings:
-        print(f"      {f['doc']}: claimed {f['claimed']:g}, computed {f['computed']:g}  ({f['expression']})")
+        if "computed" in f:
+            print(f"      {f['doc']}: claimed {f['claimed']:g}, computed {f['computed']:g}  ({f['expression']})")
+        else:
+            print(f"      {f['doc']}: {f['kind']} — {f['quote'][:100]!r}")
     if variant == "defected" and in_scope:
         print(f"      in-scope defects to catch: {[d['id'] for d in in_scope]}")
     return result
@@ -67,7 +84,7 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
 async def main() -> None:
     all_projects = [p for s in SETS.values() for p in s["projects"]]
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pass", dest="pass_name", choices=list(PASSES), default="numeric")
+    ap.add_argument("--pass", dest="pass_name", choices=PASSES, default="numeric")
     ap.add_argument("--set", choices=list(SETS), default="dev",
                     help="heldout is SEALED — read fixtures/heldout_defects/HELDOUT.md first")
     ap.add_argument("--project", choices=[*all_projects, "both"], default="both")

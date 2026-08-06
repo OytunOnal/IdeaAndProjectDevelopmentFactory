@@ -1,10 +1,12 @@
-"""Deterministic tests for the numeric-audit micro-pass (no LLM calls)."""
+"""Deterministic tests for the decomposed-DA micro-passes (no LLM calls)."""
 
 import pytest
 
 from app.agents.decomposed_da import (
     _parse_items,
+    _parse_verdict,
     check_claim,
+    merge_evidence_votes,
     safe_eval,
     validate_item,
 )
@@ -126,3 +128,36 @@ def test_parse_items_bare_array():
 def test_parse_items_garbage():
     assert _parse_items("no json here") == []
     assert _parse_items('{"not": "array"}') == []
+
+
+# ── evidence pass: verdict parsing + vote merge ───────────────────────────
+
+def test_parse_verdict_fenced_and_bare():
+    assert _parse_verdict('```json\n{"supported": false, "source": "none"}\n```') == {
+        "supported": False, "source": "none"}
+    assert _parse_verdict('{"supported": true, "source": "prd"}')["supported"] is True
+
+
+def test_parse_verdict_rejects_garbage():
+    assert _parse_verdict("not json") is None
+    assert _parse_verdict('{"supported": "yes"}') is None  # non-bool
+
+
+def test_parse_verdict_key():
+    from app.agents.decomposed_da import _parse_verdict_key
+    assert _parse_verdict_key('```json\n{"completed_claim": true}\n```', "completed_claim") is True
+    assert _parse_verdict_key('{"completed_claim": false}', "completed_claim") is False
+    assert _parse_verdict_key('{"completed_claim": "yes"}', "completed_claim") is None
+    assert _parse_verdict_key("garbage", "completed_claim") is None
+
+
+def test_merge_votes_majority_rule():
+    no = {"supported": False, "source": "none"}
+    yes = {"supported": True, "source": "prd"}
+    assert merge_evidence_votes([no, no, no]) is True
+    assert merge_evidence_votes([no, no, yes]) is True  # one noisy vote can't veto
+    assert merge_evidence_votes([no, yes, yes]) is False
+    assert merge_evidence_votes([no, yes]) is False  # tie withholds
+    assert merge_evidence_votes([no, None, None]) is True  # majority of valid
+    assert merge_evidence_votes([None, None]) is False  # fail-safe: no finding
+    assert merge_evidence_votes([]) is False
