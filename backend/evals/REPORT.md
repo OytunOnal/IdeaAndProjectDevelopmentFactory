@@ -118,3 +118,112 @@ Key findings:
    larger `num_predict`, then re-judge.
 4. Remaining role families (spec writers, judge meta-eval) per `EVAL_PLAN.md`
    steps 2 and 4.
+
+
+---
+
+# Phase 2 — Generator roles (spec documents)
+
+Canonical judge report follows (working copy lives in results/generators/JUDGE.md,
+raw generations in results/generators/<model>/ — unversioned).
+
+## Judge report
+
+Judge: Claude (frontier), reading full documents blind-ish (model label visible, scoring on content).
+Date: 2026-08-06. **Development-set results** — same two fixture projects used throughout;
+generalization claims require a held-out project set.
+
+Method: fixed-context generation (all models generate from the SAME golden inputs — see
+`gen_runner.py`). Deep-read sample: PRD + financial_model (invoicefox) and architecture
+(fleetsense) for frontier/8B/35B; R1 deep-read on PRD only (grounding scan already
+flagged it); 35B additionally skimmed on ux_design + gtm_strategy as leading local.
+
+Scores are 1–5 per dimension: Grounding (uses fixture facts, no fabrication),
+Depth (engineering/product judgment), Coherence (internal consistency incl. arithmetic),
+Format (structure contract, no wrapper artifacts).
+
+## Per-document findings
+
+### invoicefox PRD
+| Model | Grounding | Depth | Coherence | Format | Notes |
+|---|---|---|---|---|---|
+| frontier | 4 | 5 | 5 | 5 | 14 G/W/T stories, 3 personas, behavior-signal timing logic; risks section beyond template |
+| qwen3-8b | 3 | 3 | 4 | 5 | Serviceable but thin (3 stories); **fabricated stat**: "$1.4B annually (per market research)" — not in fixtures |
+| qwen3.6-35b | 5 | 4 | 5 | 5 | Best grounding density: fixture WTP band, competitor gaps, exact recommended stack + "6–10 weeks solo dev"; original per-client tone-memory feature; scope-discipline adjustment (phase memory to v2) |
+| deepseek-r1-7b | 1 | 2 | 3 | 3 | Generic ("revolutionize..."), zero fixture numbers, wrapped in ```markdown fence |
+
+### invoicefox financial_model
+| Model | Grounding | Depth | Coherence | Format | Notes |
+|---|---|---|---|---|---|
+| frontier | 4 | 4 | 5 | 5 | Correct arithmetic throughout (150×$12=$1800 MRR ✓); conservative salaried-team assumption set; honest cash-negative Y1 |
+| qwen3-8b | 3 | 3 | **1** | 5 | Arithmetic/logic riddled: invented payback formula ("12mo/1.42"), break-even 12,500 doesn't follow from own inputs, Q1 revenue contradicts own growth story, "lower price → LTV/CAC improves" inversion, wrong "per research" attributions |
+| qwen3.6-35b | 5 | 5 | 5 | 5 | **Standout.** Consistent chain ARPU→margin→CAC→LTV; correct payback formula (CAC/margin=3.0mo); break-even 1800/10.65≈169 ✓; Q1 rev 65×11.5×3≈$2,243 ✓; transparent 50→30mo lifespan discount; grounded ($10–20 band, <$40 CAC, 8% conv, PRD 600-user cross-ref) |
+
+### fleetsense architecture
+| Model | Grounding | Depth | Coherence | Format | Notes |
+|---|---|---|---|---|---|
+| frontier | 5 | 5 | 5 | 5 | Service decomposition, Celery EOD aggregation, adaptive 5s ping, <30s solve target from fixture, optional OSRM for tile-cost cap |
+| qwen3-8b | 3 | 2 | 3 | 4 | Generic diagram (Driver App → Data Storage direct edge), auth scheme inconsistent (API Key vs Firebase per endpoint), typo endpoint `/api/v/1/reports`, thin shapes |
+| qwen3.6-35b | 5 | 5 | 5 | 5 | Near-parity with frontier; **privacy handling deeper than frontier's** (shift-scoped location masking, consent token, per-region audit); tile cache grounded in fixture cost concern; realistic API shapes |
+
+### 35B skim — invoicefox ux_design, fleetsense gtm_strategy
+Both strong. UX: mermaid flows with explicit error paths (bounce→backoff→Delivery Failed CTA),
+behavior-aware escalation, tone-fatigue recovery prompt. GTM: channels grounded in fixtures
+($8/van ROI framing, courier associations, leasing/insurance bundling), concrete milestones,
+defines billing unit ("users" = active vans). No weak spots found in skim.
+
+## Aggregates (structure scan, all 40 docs — from meta.json)
+| Model | Headings full | Avg words | Avg secs | Grounding anchors (of 80) |
+|---|---|---|---|---|
+| frontier | 7/10 | 1536 | 9 | 34 |
+| qwen3-8b think-on | 10/10 | 730 | 292 | 32 |
+| qwen3.6-35b think-on | 9/10 | 886 | 210 | 29 |
+| deepseek-r1-7b | 10/10 | 691 | 91 | 19 |
+
+(Frontier's 7/10 = long-doc heading drift, not content gaps; 2 docs over word limits.
+35B's one weak doc: fleetsense financial_model, 343w — not deep-read; flagged for spot-check
+if 35B is adopted for financial role.)
+
+## Verdict (development set)
+
+- **qwen3.6:35b is migration-ready for generator roles** on this dev set: PRD/architecture at
+  or near frontier parity, financial_model arguably the best single document in the eval
+  (only model with a fully consistent numeric chain using correct formulas). One caveat:
+  its fleetsense financial (343w) was short — verify before relying on the financial role.
+- **qwen3-8b is NOT suitable for financial_model** (coherence 1 — multi-step arithmetic
+  failures, consistent with its known small-model numeric weakness) and is weak for
+  architecture (depth 2). Passable for PRD-class docs with a fabrication risk
+  (invented "$1.4B (per market research)" citation — repeats its known pattern).
+- **deepseek-r1-7b is unsuitable for generation**: fastest (91s avg) but generic content
+  (19/80 anchors), no fixture grounding, format artifacts (markdown fences).
+- **frontier remains best for breadth/depth** (PRD story coverage) but 35B's grounding
+  density matches or exceeds it; the quality gap no longer justifies API cost for these roles
+  on this dev set.
+
+## Addendum — financial-role recheck at 8192 tokens (2026-08-06)
+
+The weak 35B fleetsense financial (343w, truncated mid-sentence, 4/6 headings) was
+hypothesized to be a token-cap artifact (max_tokens=6144 shared with thinking budget).
+Recheck: both financial docs regenerated on 35B with GEN_MAX_TOKENS=8192
+(`results/generators/qwen3.6-35b_think-on_8k/`).
+
+Result: **hypothesis confirmed.** Both docs now 6/6 headings, ~850-890w, no truncation.
+Arithmetic audit:
+- fleetsense: quarterly table fully self-consistent (65×16×$8=$8,320 MRR ✓, COGS/GP/Net
+  all verify), correct payback formula (240/84≈3.0), break-even 14,000/6.40≈2,190 ✓.
+  Minor nits: GM stated 70% in unit econ vs 25% COGS (75%) in projection; "Monthly LTV"
+  mislabel; best-case sensitivity row doesn't back out exactly. Nits, not the 8B error class.
+- invoicefox: entire chain verifies (LTV 10.80×0.75/0.035≈$231 ✓, payback 48/8.10≈5.9 ✓,
+  break-even 5,800/9.20≈630 ✓, quarterly revenue/GP/net all recompute ✓). Also shows real
+  product judgment: flags free-tier cap (5 invoices) as misaligned with fixture behavior
+  data (3–8 invoices/mo) — an insight none of the other models surfaced.
+
+Conclusion: 35B financial weakness was an infra setting, not model capability.
+**Financial role: raise generation max_tokens to 8192 and route to 35B.**
+
+**Adopted role routing (user decision 2026-08-06; held-out validation still open):**
+`LLM_ROLE_PROVIDERS=...,spec=ollama:quality` + `LLM_ROLE_THINK=...,spec=on`, generation
+max_tokens raised 6144→8192 (specification.py). Original recommendation:
+all five spec generator roles → qwen3.6:35b (think-on); keep frontier as fallback chain.
+Latency note: 35B averages 210s/doc vs frontier 9s — acceptable for offline document
+generation, relevant if UX expects fast turnaround.

@@ -164,7 +164,10 @@ async def _run_spec_agent(state: ProjectState, agent_id: str) -> ProjectState:
             model_tier=spec["tier"],
             api_key=state.get("api_key"),
             temperature=0.5,
-            max_tokens=6144,
+            # 8192: with thinking models the think budget shares this cap; 6144
+            # truncated a financial_model mid-sentence (evals/results/generators/JUDGE.md)
+            max_tokens=8192,
+            role="spec",  # per-role routing (LOCAL_MIGRATION_PLAN.md)
         )
     except Exception as e:
         logger.error(f"{agent_id} failed: {e}", exc_info=True)

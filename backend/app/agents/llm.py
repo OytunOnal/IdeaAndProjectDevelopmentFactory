@@ -121,10 +121,22 @@ def _role_providers_for(role: str | None) -> list[tuple[str, str]]:
     if settings.llm_force_provider:
         return _get_all_providers()
     providers = _get_all_providers()
-    if role and _parse_role_map(settings.llm_role_providers).get(role) == "ollama":
+    value = _parse_role_map(settings.llm_role_providers).get(role) if role else None
+    if value and value.startswith("ollama"):
         logger.info(f"Role '{role}' routed to local (ollama-first)")
         return [("ollama", "ollama")] + [p for p in providers if p[0] != "ollama"]
     return providers
+
+
+def _role_ollama_tier(role: str | None) -> int | None:
+    """Optional ollama model pin from the role map: "spec=ollama:quality" pins
+    the quality model (tier1) regardless of the call's own tier; ":fast" pins
+    tier2. Needed because eval verdicts are per-model, not per-tier — e.g. the
+    Phase 2 generator verdict holds for the quality model only."""
+    if not role:
+        return None
+    value = _parse_role_map(settings.llm_role_providers).get(role, "")
+    return {"ollama:quality": 1, "ollama:fast": 2}.get(value)
 
 
 def _role_think_for(role: str | None) -> bool | None:
@@ -153,12 +165,13 @@ async def call_llm(
     """
     if think is None:
         think = _role_think_for(role)
+    ollama_tier = _role_ollama_tier(role)
 
     # If user provided a specific key, try that first then fall back
     if api_key and api_key.strip():
         provider, key = _resolve_provider(api_key)
         try:
-            return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think)
+            return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think, ollama_tier)
         except Exception as e:
             logger.warning(f"Provider {provider} (user key) failed: {e}. Trying fallbacks...")
 
@@ -167,7 +180,7 @@ async def call_llm(
     for provider, key in _role_providers_for(role):
         for attempt in range(2):  # retry once on 429
             try:
-                return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think)
+                return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think, ollama_tier)
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str and attempt == 0:
@@ -220,7 +233,10 @@ async def stream_llm(
 async def _call_single(
     messages: list[dict], provider: str, key: str, model_tier: int,
     temperature: float, max_tokens: int, think: bool | None = None,
+    ollama_tier: int | None = None,
 ) -> str:
+    if provider == "ollama" and ollama_tier is not None:
+        model_tier = ollama_tier  # role map pins the ollama model (":quality"/":fast")
     model = PROVIDERS[provider][f"tier{model_tier}"]
     if provider == "anthropic":
         return await _call_anthropic(messages, model, key, temperature, max_tokens)
