@@ -19,20 +19,21 @@ from pathlib import Path
 
 import yaml
 
-from app.agents.decomposed_da import evidence_audit, numeric_audit
-from evals.defect_runner import FIXTURES_ROOT, SETS, load_bundle, model_label
+from app.agents.decomposed_da import absence_audit, evidence_audit, numeric_audit
+from evals.defect_runner import BRIEFS, FIXTURES_ROOT, SETS, load_bundle, model_label
 
 RESULTS = Path(__file__).parent / "results" / "micro"
 
 RESEARCH_KEYS = ("market_research", "competitor_analysis", "tech_feasibility")
 
-PASSES = ("numeric", "evidence")
+PASSES = ("numeric", "evidence", "absence")
 
 # Defect types each pass is RESPONSIBLE for (recall is scored against these
 # only; other defect types are other passes' jobs).
 PASS_SCOPE = {
     "numeric": ("arithmetic-error", "impossible-math"),
     "evidence": ("fabricated-evidence",),
+    "absence": ("missing-critical",),
 }
 
 
@@ -49,6 +50,15 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
             if (path := fixtures / project / f"{key}.md").exists()
         }
         findings = await evidence_audit({**research, **docs}, audit_keys=tuple(docs), stats=stats)
+    elif pass_name == "absence":
+        research = {
+            key: path.read_text(encoding="utf-8")
+            for key in RESEARCH_KEYS
+            if (path := fixtures / project / f"{key}.md").exists()
+        }
+        findings = await absence_audit(
+            {**research, **docs}, brief=BRIEFS[project], audit_keys=tuple(docs), stats=stats
+        )
     else:
         findings = await numeric_audit(docs)
     seconds = round(time.perf_counter() - t0, 1)
@@ -69,13 +79,20 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
     stem = f"{pass_name}_{project}_{variant}"
     (outdir / f"{stem}.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    stage = f"  [extracted {stats['claims_extracted']} → gated {stats['claims_gated_in']}]" if stats else ""
+    if "claims_extracted" in stats:
+        stage = f"  [extracted {stats['claims_extracted']} → gated {stats['claims_gated_in']}]"
+    elif "applicable_items" in stats:
+        stage = f"  [checklist {stats['checklist_items']} → applicable {stats['applicable_items']}]"
+    else:
+        stage = ""
     print(f"  [{model_label()}] {stem}: {len(findings)} findings in {seconds}s{stage}")
     for f in findings:
         if "computed" in f:
             print(f"      {f['doc']}: claimed {f['claimed']:g}, computed {f['computed']:g}  ({f['expression']})")
-        else:
+        elif "quote" in f:
             print(f"      {f['doc']}: {f['kind']} — {f['quote'][:100]!r}")
+        else:
+            print(f"      {f['kind']}: {f['topic']}")
     if variant == "defected" and in_scope:
         print(f"      in-scope defects to catch: {[d['id'] for d in in_scope]}")
     return result

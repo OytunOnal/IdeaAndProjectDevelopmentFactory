@@ -470,6 +470,150 @@ async def evidence_audit(
     return findings
 
 
+# ── pass 3: checklist absence scan ─────────────────────────────────────────
+#
+# Targets missing-critical defects (a load-bearing section silently absent).
+# Absence is exactly what open-ended review is worst at — you cannot quote
+# what isn't there — so the scan inverts it into narrow presence questions
+# over a fixed checklist (the micro-pass form of the absence-scan duty that
+# took the frontier DA prompt from 77% to 100% on the dev set). Two stages,
+# both 3-vote majority: an applicability gate (is this topic critical for
+# THIS product?) keeps the checklist from firing on products it doesn't
+# apply to; a presence scan over the SPEC docs only — research inputs serve
+# as applicability context, because "research flags the concern, no spec
+# document addresses it" is precisely the defect.
+#
+# The checklist is deliberately short. Every item added is an FP surface on
+# products where the topic is only marginally relevant; grow it item by
+# item, each with measurement.
+
+ABSENCE_CHECKLIST = (
+    {
+        "key": "privacy-compliance",
+        "desc": "handling of personal/user data: privacy commitments, data protection, regulatory compliance (e.g. GDPR/KVKK), data retention or deletion",
+    },
+    {
+        "key": "legal-consent-safety",
+        "desc": "consent, liability, safety, or legal obligations created by the product's operation (e.g. tracking people, serving minors, brokering dangerous goods, handling money)",
+    },
+)
+
+_ABSENCE_APPLICABLE_PROMPT = """Answer one narrow question about a software product.
+
+Product context:
+{context}
+
+Topic: {desc}
+
+Is this topic a CRITICAL concern that this product's specification must address — one whose absence a reviewer should flag? Answer strictly for this product, not in general.
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"critical": true/false}}
+```"""
+
+_ABSENCE_PRESENT_PROMPT = """Answer one narrow question about a set of specification documents.
+
+Topic: {desc}
+
+Do the documents below SUBSTANTIVELY address this topic — a dedicated section, or explicit commitments/mechanisms? An incidental word match does not count.
+
+Rules:
+- If addressed: "quote" must be a VERBATIM sentence from the documents proving it.
+- If not addressed: "quote" is "".
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"addressed": true/false, "quote": "..."}}
+```"""
+
+
+async def absence_audit(
+    docs: dict[str, str],
+    brief: dict | None = None,
+    audit_keys: tuple[str, ...] | None = None,
+    votes: int = 3,
+    stats: dict | None = None,
+) -> list[dict]:
+    """Run the absence micro-pass: for each checklist topic, gate on
+    applicability (brief + full bundle as context), then scan the audited
+    docs for substantive presence. Flag topics that are critical but absent."""
+    audit_keys = audit_keys or tuple(docs)
+    spec_text = "\n\n".join(
+        f"=== {key} ===\n{docs[key]}" for key in audit_keys if docs.get(key, "").strip()
+    )
+    context = json.dumps(brief, ensure_ascii=False) if brief else ""
+    extra = "\n\n".join(
+        f"=== {key} (research input) ===\n{text[:2500]}"
+        for key, text in docs.items()
+        if key not in audit_keys and text and text.strip()
+    )
+    if extra:
+        context = f"{context}\n\n{extra}" if context else extra
+
+    findings: list[dict] = []
+    applicable_count = 0
+    for item in ABSENCE_CHECKLIST:
+        votes_a: list[bool] = []
+        for _ in range(votes):
+            try:
+                reply = await call_llm(
+                    messages=[{
+                        "role": "user",
+                        "content": _ABSENCE_APPLICABLE_PROMPT.format(context=context, desc=item["desc"]),
+                    }],
+                    model_tier=2, temperature=0.3, max_tokens=256,
+                    role="audit", think=False,
+                )
+                v = _parse_verdict_key(reply, "critical")
+                if v is not None:
+                    votes_a.append(v)
+            except Exception as e:
+                logger.warning(f"absence_audit applicability failed: {e}")
+        if not (votes_a and sum(votes_a) * 2 > len(votes_a)):  # majority critical
+            continue
+        applicable_count += 1
+
+        votes_p: list[bool] = []
+        for _ in range(votes):
+            try:
+                reply = await call_llm(
+                    messages=[
+                        {"role": "system", "content": _ABSENCE_PRESENT_PROMPT.format(desc=item["desc"])},
+                        {"role": "user", "content": f"Documents:\n\n{spec_text}"},
+                    ],
+                    model_tier=2, temperature=0.3, max_tokens=512,
+                    role="audit", think=False,
+                )
+                data = _parse_json_object(reply)
+                addressed = data.get("addressed") if data else None
+                if not isinstance(addressed, bool):
+                    continue
+                if addressed:
+                    quote = data.get("quote", "")
+                    # an "addressed" vote must prove itself with a real quote
+                    if not quote or _normalize_ws(quote) not in _normalize_ws(spec_text):
+                        logger.debug(f"absence_audit: addressed-vote without valid quote dropped ({item['key']})")
+                        continue
+                votes_p.append(addressed)
+            except Exception as e:
+                logger.warning(f"absence_audit presence failed: {e}")
+        absent = sum(1 for v in votes_p if not v)
+        if votes_p and absent * 2 > len(votes_p):  # majority says absent
+            findings.append({
+                "kind": "missing-critical",
+                "topic": item["key"],
+                "detail": f"No spec document substantively addresses: {item['desc']}",
+            })
+    if stats is not None:
+        stats.update({
+            "checklist_items": len(ABSENCE_CHECKLIST),
+            "applicable_items": applicable_count,
+            "findings": len(findings),
+        })
+    return findings
+
+
 def format_numeric_findings(findings: list[dict]) -> str:
     """Render findings in the DA report's evidence-first style."""
     if not findings:
