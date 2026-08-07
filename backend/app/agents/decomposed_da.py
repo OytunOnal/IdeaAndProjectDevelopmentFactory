@@ -144,8 +144,8 @@ def check_claim(item: dict, rel_tolerance: float = 0.2) -> dict | None:
 _EXTRACT_PROMPT = """You are a numeric-claims extractor. You do NOT judge whether math is correct — you only convert a document's arithmetic claims into checkable expressions. A separate program does the checking.
 
 From the document below, extract every claim where the document states BOTH the inputs AND a computed result. Typical patterns:
-- explicit formulas: "LTV: $144 (12 × $12)"
-- ratios: "LTV:CAC ≈ 3.6:1" where LTV and CAC both appear in the document
+- explicit formulas: "LTV: $168 (24 × $7)"
+- ratios: "LTV:CAC ≈ 3.1:1" where LTV and CAC both appear in the document
 - churn/lifetime/retention: lifetime = 1/churn; retained after N months = (1-churn)^N
 - break-even: users = fixed costs ÷ per-user contribution
 - revenue: users × price, GMV × take rate
@@ -158,11 +158,16 @@ Rules:
 - Skip claims where inputs are not stated anywhere in the document.
 - Skip pure targets/assumptions with no computation attached ("CAC target $40").
 
-Example — document says "LTV: $35" and "CAC: $40" and "LTV:CAC ≈ 3.6 : 1":
+Example — document says "LTV: $23" and "CAC: $31" and "LTV:CAC ≈ 3.1 : 1":
 ```json
-[{"quote": "LTV:CAC ≈ 3.6 : 1", "expression": "35 / 40", "claimed": 3.6}]
+[{"quote": "LTV:CAC ≈ 3.1 : 1", "expression": "23 / 31", "claimed": 3.1}]
 ```
-(claimed is 3.6 — the document's stated ratio — NOT 0.875, your computation.)
+(claimed is 3.1 — the document's stated ratio — NOT 0.74, your computation.)
+
+Example — document says "ARPU: $9/month" in one line and "Month-12 target: 400 paying studios → $3,600 MRR" in another. Revenue chains are checkable ACROSS lines (MRR = paying users × ARPU) — the inputs do not need to sit in the quoted sentence, only somewhere in the document:
+```json
+[{"quote": "Month-12 target: 400 paying studios → $3,600 MRR", "expression": "400 * 9", "claimed": 3600}]
+```
 
 Example — document says "Monthly churn: 5% → average lifetime ≈ 20 months → ~54% retained after 12 months". This ONE sentence yields TWO checkable claims (lifetime = 1/churn; retained = (1-churn)^12):
 ```json
@@ -173,7 +178,7 @@ Churn/lifetime/retention chains are a REQUIRED extraction whenever a document st
 
 Respond with ONLY a fenced JSON array (no commentary):
 ```json
-[{"quote": "...", "expression": "12 * 12", "claimed": 144}]
+[{"quote": "...", "expression": "7 * 24", "claimed": 168}]
 ```
 If the document contains no checkable claims, respond with an empty array."""
 
@@ -264,16 +269,16 @@ Rules:
 - "quote": copy the claiming sentence VERBATIM from the document.
 - "asserts": one short sentence stating what evidence the claim presupposes exists.
 
-Worked examples — extracted vs NOT extracted:
-- "Our closed beta of 120 users converted at 22%" → EXTRACT (past result asserted as fact)
-- "Month 1-2: closed list of 40 users from communities, weekly feedback loop" → do NOT extract (a launch-phase PLAN, nothing has happened yet)
-- "Month-12 target: 500 paying users → $6,000 MRR" → do NOT extract (a target)
-- "LTV:CAC ≈ 4 : 1 — healthy" → do NOT extract (a computation, not an empirical event)
+Worked examples (fictional studio-booking product) — extracted vs NOT extracted:
+- "Our closed beta of 90 studios converted at 18%" → EXTRACT (past result asserted as fact)
+- "Month 1-2: onboard 40 studios from local networks, weekly feedback loop" → do NOT extract (a launch-phase PLAN, nothing has happened yet)
+- "Month-12 target: 500 paying studios → $4,500 MRR" → do NOT extract (a target)
+- "LTV:CAC ≈ 3.1 : 1 — healthy" → do NOT extract (a computation, not an empirical event)
 - "costs cross MRR at roughly month 13 at current assumptions" → do NOT extract (a projection)
 
 Respond with ONLY a fenced JSON array (no commentary):
 ```json
-[{"quote": "...", "asserts": "a 200-freelancer closed beta was run and converted at 34%"}]
+[{"quote": "...", "asserts": "a 90-studio closed beta was run and converted at 18%"}]
 ```
 If the document contains no first-party empirical claims, respond with an empty array."""
 
@@ -294,6 +299,8 @@ The claim (from {claim_doc}) presupposes: {asserts}
 Claim text: "{quote}"
 
 Question: do the sources explicitly state that this event/result has actually happened (not merely planned, proposed, or targeted)? A plan to run a pilot does NOT support a claim that a pilot produced results.
+
+Worked example (fictional): claim says "our 40-studio beta converted at 18%"; the sources only say "Month 1-2: onboard 40 studios from local networks". That is a PLAN — nothing states the beta ran or produced 18%. Correct answer: {{"supported": false, "source": "none"}}. Only an explicit statement that the event occurred WITH results counts as support.
 
 Respond with ONLY a fenced JSON object:
 ```json
@@ -610,6 +617,215 @@ async def absence_audit(
             "checklist_items": len(ABSENCE_CHECKLIST),
             "applicable_items": applicable_count,
             "findings": len(findings),
+        })
+    return findings
+
+
+# ── pass 4: cross-document consistency ─────────────────────────────────────
+#
+# Targets cross-doc-inconsistency (and same-doc value drift): the same
+# quantity stated with different values in different places ($8/van in the
+# PRD, $15/van in the GTM). Narrow extraction turns each doc's key
+# quantitative facts into (concept, value, unit) rows; CODE pairs same-unit
+# rows whose values disagree; a narrow same-quantity question (3-vote
+# majority) decides whether a disagreeing pair really talks about the same
+# thing. The LLM never decides "is this inconsistent" — code does, from
+# values it validated.
+
+_FACTS_EXTRACT_PROMPT = """You are a quantitative-facts extractor. You do NOT judge consistency — you only list facts. A separate program compares them.
+
+From the document below, extract the KEY quantitative facts a reviewer would cross-check: prices, fees/take rates, churn/conversion/retention rates, unit costs, headline targets (users, GMV, MRR), team size, timeline length.
+
+Rules:
+- "quote": copy the stating sentence VERBATIM from the document.
+- "concept": a short generic label for what the value measures (e.g. "pro plan monthly price", "take rate", "monthly churn", "month-12 paying users target").
+- "value": the number, and "unit": a CANONICAL unit string. Use exactly these forms where they apply: "USD/month", "USD/<thing>/month" (e.g. "USD/seat/month"), "USD", "percent", "users", "months", "engineers". Percentages: value 8, unit "percent" (not 0.08).
+- One fact per row; skip derived commentary (ratios, LTV math) — pass those over.
+- At most 8 facts; prefer the ones most likely to be restated in other documents.
+
+Respond with ONLY a fenced JSON array (no commentary):
+```json
+[{"quote": "Studio plan: $9/month — unlimited bookings", "concept": "studio plan monthly price", "value": 9, "unit": "USD/month"}]
+```"""
+
+_SAME_QUANTITY_PROMPT = """Answer one narrow question about two statements from the same project's documents.
+
+Statement A (from {doc_a}): "{quote_a}"
+Statement B (from {doc_b}): "{quote_b}"
+
+Do A and B refer to the SAME quantity — the same price, rate, metric, or target of the same thing? IGNORE whether the stated numbers match: you are identifying what is being measured, not checking agreement. (If the same quantity is stated with different numbers, that is exactly what a later check needs to know.) A future-date growth target and a computed break-even threshold are DIFFERENT quantities even when both count the same unit.
+
+Both sides (fictional studio-booking product):
+- "$6 per seat per month" (PRD pricing) vs "Self-serve at $9/seat/month" (GTM) → SAME quantity (both are the product's per-seat subscription price), even though the numbers differ.
+- "Only paid plan: Studio at $9/month" vs "ARPU: $13/month" → SAME quantity here (with a single paid plan and no discounts, paid-user ARPU and the plan price are the same number by definition).
+- "LTV: $96" vs "CAC: $31" → NOT the same quantity (two different metrics that merely share a unit).
+- "monthly churn 4%" vs "trial-to-paid conversion 12%" → NOT the same quantity.
+- "$6 per seat per month" vs "average studio revenue $54/month" → NOT the same quantity (different denominators: per-seat vs per-studio; one is derived from the other).
+- "Month-12 target: 400 studios" vs "break-even at ~150 studios" → NOT the same quantity (a growth target vs a break-even threshold).
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"same_quantity": true/false}}
+```"""
+
+
+def _fact_valid(item: dict, doc_text: str) -> bool:
+    quote, concept, unit = item.get("quote", ""), item.get("concept"), item.get("unit")
+    if not quote or not concept or not unit:
+        return False
+    if _normalize_ws(quote) not in _normalize_ws(doc_text):
+        return False
+    try:
+        value = float(item["value"])
+    except (TypeError, ValueError):
+        return False
+    return _grounded(value, _numbers_in(quote), scaffolding=False)
+
+
+def _unit_family(unit: str) -> tuple[str, str]:
+    """Coarse unit family for pairing: (base, period). Extraction unit tags
+    drift between samples ("USD/van/month" vs "USD/month" for the same
+    price), so exact-string matching silently drops real pairs — pair by
+    family and let the narrow same-quantity question handle the per-what
+    distinction."""
+    tokens = [t.strip() for t in unit.lower().split("/") if t.strip()]
+    if not tokens:
+        return ("", "")
+    return (tokens[0], tokens[-1] if len(tokens) > 1 else "")
+
+
+# PARKED CLASS — context-established identities (dev defect A4: ARPU vs the
+# single paid plan's price). Exhaustively measured, 6 configurations:
+# bare question 8B/35B (blind to the identity — correctly, given the info);
+# ±250-char context 8B (catches it, 10 clean FPs) / 35B (still blind, 2 FPs);
+# unanimous context-CONFIRMATION layer on bare-rejected pairs (still blind
+# AND +4 clean FPs); recasting as a numeric revenue-chain check (extractor
+# picks the self-consistent rate, catch is luck). The frozen config is the
+# bare question. Durable fix: distillation (Phase 4) or the open-critique
+# pass; not more prompt surgery here.
+def is_derived(a: dict, b: dict, fact_values: list[float], rel_tolerance: float = 0.05) -> bool:
+    """True when one value is (approximately) the other times some stated
+    fact — e.g. $120/fleet = $8/van × 15 vans (avg fleet size). Such pairs
+    are DERIVATIONS, not inconsistencies; measured as the pass's main FP
+    source. Code decides — no vote involved."""
+    va, vb = float(a["value"]), float(b["value"])
+    lo, hi = sorted((abs(va), abs(vb)))
+    if lo == 0:
+        return False
+    for f in fact_values:
+        if f <= 1 or f in (va, vb):
+            continue
+        if abs(hi - lo * f) / hi <= rel_tolerance:
+            return True
+    return False
+
+
+def candidate_pairs(facts: list[dict], rel_tolerance: float = 0.1, cap: int = 30) -> list[tuple[dict, dict]]:
+    """Code-side pairing: same unit FAMILY, values disagreeing beyond
+    tolerance. Concept-token overlap ranks pairs first (likely same quantity),
+    but is not required — ARPU vs price share no token yet must be compared."""
+    def overlap(a: dict, b: dict) -> int:
+        stop = {"the", "a", "of", "per", "monthly", "plan", "target"}
+        ta = {w for w in re.findall(r"[a-z0-9]+", a["concept"].lower()) if w not in stop}
+        tb = {w for w in re.findall(r"[a-z0-9]+", b["concept"].lower()) if w not in stop}
+        return len(ta & tb)
+
+    pairs = []
+    for i in range(len(facts)):
+        for j in range(i + 1, len(facts)):
+            a, b = facts[i], facts[j]
+            if _unit_family(a["unit"]) != _unit_family(b["unit"]):
+                continue
+            va, vb = float(a["value"]), float(b["value"])
+            if abs(va - vb) / max(abs(va), abs(vb), 1e-9) <= rel_tolerance:
+                continue
+            pairs.append((overlap(a, b), a, b))
+    pairs.sort(key=lambda t: -t[0])
+    return [(a, b) for _, a, b in pairs[:cap]]
+
+
+async def consistency_audit(
+    docs: dict[str, str],
+    audit_keys: tuple[str, ...] | None = None,
+    samples: int = 2,
+    votes: int = 3,
+    stats: dict | None = None,
+) -> list[dict]:
+    """Run the cross-document consistency micro-pass."""
+    audit_keys = audit_keys or tuple(docs)
+    facts: list[dict] = []
+    seen: set[tuple] = set()
+    for doc_key in audit_keys:
+        doc_text = docs.get(doc_key) or ""
+        if not doc_text.strip():
+            continue
+        for _ in range(samples):
+            try:
+                reply = await call_llm(
+                    messages=[
+                        {"role": "system", "content": _FACTS_EXTRACT_PROMPT},
+                        {"role": "user", "content": f"Document ({doc_key}):\n\n{doc_text}"},
+                    ],
+                    model_tier=2, temperature=0.3, max_tokens=2048,
+                    role="audit", think=False,
+                )
+            except Exception as e:
+                logger.warning(f"consistency_audit extraction failed for {doc_key}: {e}")
+                continue
+            for item in _parse_items(reply):
+                if not _fact_valid(item, doc_text):
+                    continue
+                key = (doc_key, round(float(item["value"]), 4), item["unit"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append({"doc": doc_key, "quote": item["quote"],
+                              "concept": item["concept"], "value": float(item["value"]),
+                              "unit": item["unit"]})
+
+    fact_values = [f["value"] for f in facts]
+    pairs = [(a, b) for a, b in candidate_pairs(facts) if not is_derived(a, b, fact_values)]
+    findings: list[dict] = []
+    for a, b in pairs:
+        votes_s: list[bool] = []
+        for _ in range(votes):
+            try:
+                reply = await call_llm(
+                    messages=[{
+                        "role": "user",
+                        "content": _SAME_QUANTITY_PROMPT.format(
+                            doc_a=a["doc"], quote_a=a["quote"],
+                            doc_b=b["doc"], quote_b=b["quote"],
+                        ),
+                    }],
+                    model_tier=2, temperature=0.3, max_tokens=256,
+                    role="audit", think=False,
+                )
+                v = _parse_verdict_key(reply, "same_quantity")
+                if v is not None:
+                    votes_s.append(v)
+            except Exception as e:
+                logger.warning(f"consistency_audit same-quantity failed: {e}")
+        if votes_s and sum(votes_s) * 2 > len(votes_s):  # bare majority flags
+            findings.append({
+                "kind": "cross-doc-inconsistency",
+                "doc": f"{a['doc']} vs {b['doc']}",
+                "quote": f"{a['quote']}  ⇄  {b['quote']}",
+                "values": [a["value"], b["value"]],
+                "unit": a["unit"],
+            })
+    if stats is not None:
+        stats.update({
+            "facts_extracted": len(facts),
+            "pairs_compared": len(pairs),
+            "findings": len(findings),
+            "pairs_detail": [
+                f"{a['doc']}[{a['concept']}={a['value']:g}] vs {b['doc']}[{b['concept']}={b['value']:g}] ({a['unit']})"
+                for a, b in pairs
+            ],
+            "facts_detail": [
+                f"{f['doc']}[{f['concept']}={f['value']:g} {f['unit']}]" for f in facts
+            ],
         })
     return findings
 

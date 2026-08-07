@@ -143,6 +143,65 @@ def test_parse_verdict_rejects_garbage():
     assert _parse_verdict('{"supported": "yes"}') is None  # non-bool
 
 
+def test_candidate_pairs_same_unit_disagreeing_values():
+    from app.agents.decomposed_da import candidate_pairs
+    facts = [
+        {"doc": "prd", "quote": "q1", "concept": "per-van monthly price", "value": 8, "unit": "USD/van/month"},
+        {"doc": "gtm", "quote": "q2", "concept": "self-serve van price", "value": 15, "unit": "USD/van/month"},
+        {"doc": "financial", "quote": "q3", "concept": "monthly churn", "value": 3, "unit": "percent"},
+        {"doc": "prd", "quote": "q4", "concept": "per-van monthly price", "value": 8.2, "unit": "USD/van/month"},
+    ]
+    pairs = candidate_pairs(facts)
+    # 8 vs 15 pairs (units match, disagree); 8 vs 8.2 within tolerance; churn has no partner
+    assert len(pairs) == 2  # (8,15) and (15,8.2)
+    values = {frozenset((a["value"], b["value"])) for a, b in pairs}
+    assert frozenset((8, 15)) in values and frozenset((8.2, 15)) in values
+
+
+def test_candidate_pairs_unit_family_bridges_tag_drift():
+    from app.agents.decomposed_da import candidate_pairs
+    facts = [
+        {"doc": "prd", "quote": "q", "concept": "van monthly price", "value": 8, "unit": "USD/month"},
+        {"doc": "gtm", "quote": "q", "concept": "self-serve van price", "value": 15, "unit": "USD/van/month"},
+    ]
+    # measured failure: the same price tagged USD/month in one doc and
+    # USD/van/month in another must still pair
+    assert len(candidate_pairs(facts)) == 1
+
+
+def test_is_derived_guard():
+    from app.agents.decomposed_da import is_derived
+    a = {"value": 8}   # $8/van
+    b = {"value": 120}  # $120/fleet
+    # 120 = 8 × 15 where 15 (avg fleet size) is a stated fact → derivation
+    assert is_derived(a, b, [8, 120, 15, 25]) is True
+    # 8 vs 15 (the real price mismatch): no fact ≈ 1.875 → NOT derived
+    assert is_derived({"value": 8}, {"value": 15}, [8, 15, 120, 25]) is False
+    # the pair's own values don't count as multipliers
+    assert is_derived({"value": 2}, {"value": 30}, [2, 30]) is False
+
+
+def test_candidate_pairs_ranks_token_overlap_first():
+    from app.agents.decomposed_da import candidate_pairs
+    facts = [
+        {"doc": "a", "quote": "q", "concept": "take rate", "value": 15, "unit": "percent"},
+        {"doc": "b", "quote": "q", "concept": "take rate", "value": 25, "unit": "percent"},
+        {"doc": "c", "quote": "q", "concept": "monthly churn", "value": 8, "unit": "percent"},
+    ]
+    pairs = candidate_pairs(facts)
+    assert pairs[0][0]["concept"] == "take rate" and pairs[0][1]["concept"] == "take rate"
+
+
+def test_fact_valid_grounding():
+    from app.agents.decomposed_da import _fact_valid
+    doc = "Self-serve at **$8/van/month**; 14-day trial."
+    assert _fact_valid({"quote": "Self-serve at $8/van/month", "concept": "van price",
+                        "value": 8, "unit": "USD/van/month"}, doc) is True
+    assert _fact_valid({"quote": "Self-serve at $8/van/month", "concept": "van price",
+                        "value": 15, "unit": "USD/van/month"}, doc) is False  # value not in quote
+    assert _fact_valid({"quote": "not in doc", "concept": "x", "value": 8, "unit": "USD"}, doc) is False
+
+
 def test_parse_verdict_key():
     from app.agents.decomposed_da import _parse_verdict_key
     assert _parse_verdict_key('```json\n{"completed_claim": true}\n```', "completed_claim") is True
