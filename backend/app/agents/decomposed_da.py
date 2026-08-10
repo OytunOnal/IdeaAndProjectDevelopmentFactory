@@ -142,6 +142,38 @@ def check_claim(item: dict, rel_tolerance: float = 0.2) -> dict | None:
     }
 
 
+def cross_line_inputs(item: dict) -> list[float]:
+    """Expression inputs that do NOT appear in the claim's own quote —
+    i.e. the model pulled them from elsewhere in the document. Scaffolding
+    constants don't count."""
+    quote_numbers = _numbers_in(item.get("quote", ""))
+    return [n for n in _numbers_in(item.get("expression", ""))
+            if not _grounded(n, quote_numbers, scaffolding=True)]
+
+
+def sentence_with_number(doc_text: str, value: float) -> str:
+    """First document line containing the value (percent variants included) —
+    used to show a chain-confirmation judge where an outside input came from."""
+    for line in doc_text.splitlines():
+        if _grounded(value, _numbers_in(line), scaffolding=False):
+            return line.strip()
+    return ""
+
+
+_CHAIN_CONFIRM_PROMPT = """Answer one narrow question about an arithmetic claim in a document.
+
+The document claims: "{quote}" (stated result: {claimed}).
+A checker built the computation `{expression}` using inputs from OTHER lines of the same document:
+{sources}
+
+Is `{expression}` the computation this claim itself describes — do the input quantities' TYPES match what the claimed result measures? (Fictional example of a mismatch: the claim states a per-renter CONTRIBUTION, but the chained input is the platform's per-booking REVENUE — related numbers, wrong computation.)
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"matches": true/false}}
+```"""
+
+
 # ── extraction call (narrow LLM) ───────────────────────────────────────────
 
 _EXTRACT_PROMPT = """You are a numeric-claims extractor. You do NOT judge whether math is correct — you only convert a document's arithmetic claims into checkable expressions. A separate program does the checking.
@@ -245,6 +277,37 @@ async def numeric_audit(
                 if key in seen:
                     continue
                 seen.add(key)
+                # cross-line chain confirmation (measured held-out FP class):
+                # when inputs came from other lines, the model may have chained
+                # a related-but-wrong rate (revenue vs contribution) — a narrow
+                # type-match vote gates the finding; in-quote claims skip this
+                outside = cross_line_inputs(item)
+                if outside:
+                    sources = "\n".join(
+                        f'- {v:g}: "{sentence_with_number(doc_text, v)}"' for v in outside
+                    )
+                    votes_m: list[bool] = []
+                    for _ in range(3):
+                        try:
+                            reply_c = await call_llm(
+                                messages=[{
+                                    "role": "user",
+                                    "content": _CHAIN_CONFIRM_PROMPT.format(
+                                        quote=item["quote"], claimed=item["claimed"],
+                                        expression=item["expression"], sources=sources,
+                                    ),
+                                }],
+                                model_tier=2, temperature=0.3, max_tokens=256,
+                                role="audit", think=False,
+                            )
+                            v = _parse_verdict_key(reply_c, "matches")
+                            if v is not None:
+                                votes_m.append(v)
+                        except Exception as e:
+                            logger.warning(f"numeric_audit chain-confirm failed: {e}")
+                    if not (votes_m and sum(votes_m) * 2 > len(votes_m)):
+                        logger.debug(f"numeric_audit: cross-line chain not confirmed, dropped: {item}")
+                        continue
                 findings.append({"doc": doc_key, **finding})
     return findings
 
@@ -722,14 +785,23 @@ def is_derived(a: dict, b: dict, facts: list[dict], rel_tolerance: float = 0.05)
     if lo == 0:
         return False
     pair_family = _unit_family(a["unit"])
-    for fact in facts:
-        if _unit_family(fact["unit"]) == pair_family:
-            continue  # same-family values are comparands, not multipliers
-        f = float(fact["value"])
-        if f <= 1:
-            continue
+    cross_unit = [float(f["value"]) for f in facts
+                  if _unit_family(f["unit"]) != pair_family and float(f["value"]) > 1]
+    same_unit = [float(f["value"]) for f in facts
+                 if _unit_family(f["unit"]) == pair_family]
+    for f in cross_unit:
+        # one-factor: the larger value = the smaller × a stated count
         if abs(hi - lo * f) / hi <= rel_tolerance:
             return True
+        # two-factor: the larger value = a stated count × another same-family
+        # fact (e.g. $14,400 MRR = 120 fleets × $120/fleet, where neither
+        # factor is the pair's other member) — extraction variance means the
+        # one-factor route's exact multiplier isn't always in the fact list
+        for g in same_unit:
+            if g in (va, vb):
+                continue
+            if abs(hi - f * g) / hi <= rel_tolerance:
+                return True
     return False
 
 
@@ -751,6 +823,12 @@ def candidate_pairs(facts: list[dict], rel_tolerance: float = 0.1, cap: int = 30
                 continue
             va, vb = float(a["value"]), float(b["value"])
             if abs(va - vb) / max(abs(va), abs(vb), 1e-9) <= rel_tolerance:
+                continue
+            # degenerate self-pair guard (measured on held-out): two extraction
+            # variants of the SAME sentence must not be compared against each
+            # other — same doc + overlapping quotes is the same statement
+            qa, qb = _normalize_ws(a["quote"]).lower(), _normalize_ws(b["quote"]).lower()
+            if a["doc"] == b["doc"] and (qa in qb or qb in qa):
                 continue
             pairs.append((overlap(a, b), a, b))
     pairs.sort(key=lambda t: -t[0])

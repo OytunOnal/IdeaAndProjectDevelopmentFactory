@@ -139,6 +139,47 @@ def test_parse_items_garbage():
     assert _parse_items('{"not": "array"}') == []
 
 
+# ── Phase 3.5 FP guards ────────────────────────────────────────────────────
+
+def test_cross_line_inputs_classification():
+    from app.agents.decomposed_da import cross_line_inputs
+    # in-quote chain (A3 style): both inputs in the quote → no outside inputs
+    item = {"quote": "LTV: $35, CAC: $40, ratio 3.6:1", "expression": "35 / 40", "claimed": 3.6}
+    assert cross_line_inputs(item) == []
+    # cross-line chain: 5.25 pulled from another line
+    item = {"quote": "1.8 bookings/month → $6.30 monthly contribution",
+            "expression": "1.8 * 5.25", "claimed": 6.3}
+    assert cross_line_inputs(item) == [5.25]
+    # scaffolding (1, 100) never counts as outside
+    item = {"quote": "churn 5% → ~54% retained after 12 months",
+            "expression": "(1 - 0.05) ** 12", "claimed": 0.54}
+    assert cross_line_inputs(item) == []
+
+
+def test_sentence_with_number():
+    from app.agents.decomposed_da import sentence_with_number
+    doc = "## Fees\n- Platform revenue: $5.25 per booking\n- Contribution: $3.50 per booking"
+    assert "5.25" in sentence_with_number(doc, 5.25)
+    assert "3.50" in sentence_with_number(doc, 3.5)
+    assert sentence_with_number(doc, 999) == ""
+
+
+def test_candidate_pairs_skips_same_sentence_variants():
+    from app.agents.decomposed_da import candidate_pairs
+    # measured held-out FP: two extraction variants of the same sentence with
+    # drifted values must not be paired against each other
+    facts = [
+        {"doc": "gtm", "quote": "Targets: 120 machines listed pre-launch; 400 by month 12",
+         "concept": "machines target", "value": 120, "unit": "machines"},
+        {"doc": "gtm", "quote": "Targets: 120 machines listed pre-launch",
+         "concept": "machines listed", "value": 400, "unit": "machines"},
+    ]
+    assert candidate_pairs(facts) == []
+    # different docs with same values still pair
+    facts[1]["doc"] = "prd"
+    assert len(candidate_pairs(facts)) == 1
+
+
 # ── composition ────────────────────────────────────────────────────────────
 
 def test_compose_report_empty_is_honest():
@@ -221,6 +262,24 @@ def test_is_derived_guard():
     # same-family values never act as multipliers (money × money is meaningless)
     assert is_derived({"value": 2, "unit": "USD"}, {"value": 30, "unit": "USD"},
                       [{"value": 15, "unit": "USD"}]) is False
+
+
+def test_is_derived_two_factor_product():
+    from app.agents.decomposed_da import is_derived
+    # measured persistent FP: $14,400 MRR vs $8/van — derivable as
+    # 120 fleets × $120/fleet even when the 1,800-van multiplier wasn't extracted
+    facts = [
+        {"value": 8, "unit": "USD/van/month"},
+        {"value": 120, "unit": "fleets"},
+        {"value": 120, "unit": "USD/month"},
+        {"value": 14400, "unit": "USD/month"},
+    ]
+    a = {"value": 8, "unit": "USD/van/month"}
+    b = {"value": 14400, "unit": "USD/month"}
+    assert is_derived(a, b, facts) is True
+    # but a genuine mismatch pair stays underived: 8 vs 15, no product ≈ 15
+    assert is_derived({"value": 8, "unit": "USD/van/month"},
+                      {"value": 15, "unit": "USD/van/month"}, facts) is False
 
 
 def test_is_derived_count_value_collision():
