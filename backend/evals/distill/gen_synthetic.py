@@ -135,25 +135,34 @@ async def gen_brief(name: str, idea: str) -> dict:
     return brief
 
 
-async def gen_docs(name: str, brief: dict) -> dict[str, str]:
+async def gen_docs(name: str, brief: dict, outdir: Path) -> dict[str, str]:
     """Generate the 5 spec docs with the production generator prompts (the
-    measured local generator path — tier per SPEC_AGENTS, quality model)."""
+    measured local generator path — tier per SPEC_AGENTS, quality model).
+
+    Each document is written as soon as it exists and reused on resume:
+    generation is the expensive part and interruptions are routine here."""
     state: dict = {"project_name": name, "idea_brief": brief}
     docs: dict[str, str] = {}
     for agent_id, spec in SPEC_AGENTS.items():
-        user_content = (
-            f"{brief_context(state)}\n\n---\n\n{docs_context(state, spec['context'])}"
-            f"\n\n---\n\nWrite the {spec['title']} for this project now."
-        )
-        doc = await call_llm(
-            messages=[
-                {"role": "system", "content": spec["prompt"]},
-                {"role": "user", "content": user_content},
-            ],
-            model_tier=spec["tier"], temperature=0.6, max_tokens=8192, role="spec",
-        )
-        docs[spec["output_key"]] = doc
-        state[spec["output_key"]] = doc
+        key = spec["output_key"]
+        path = outdir / f"{key}.md"
+        if path.exists():
+            doc = path.read_text(encoding="utf-8")
+        else:
+            user_content = (
+                f"{brief_context(state)}\n\n---\n\n{docs_context(state, spec['context'])}"
+                f"\n\n---\n\nWrite the {spec['title']} for this project now."
+            )
+            doc = await call_llm(
+                messages=[
+                    {"role": "system", "content": spec["prompt"]},
+                    {"role": "user", "content": user_content},
+                ],
+                model_tier=spec["tier"], temperature=0.6, max_tokens=8192, role="spec",
+            )
+            path.write_text(doc, encoding="utf-8")
+        docs[key] = doc
+        state[key] = doc
     return docs
 
 
@@ -179,23 +188,42 @@ async def plant_defect(doc_key: str, doc_text: str, defect_type: str) -> dict | 
             "note": data.get("note", "")}
 
 
+def is_complete(outdir: Path) -> bool:
+    """A project counts as done only when its LAST artifact exists — the
+    completion marker must be written last, or an interrupted project is
+    skipped forever on resume (measured: 17 of 20 projects silently left
+    half-generated because the marker was brief.json, written first)."""
+    return (outdir / "defects.json").exists() and all(
+        (outdir / f"{key}.md").exists() for key in SPEC_KEYS
+    )
+
+
 async def build_project(name: str, idea: str, defects_per_project: int, rng: random.Random) -> None:
     outdir = DATA / "projects" / name
-    if (outdir / "brief.json").exists():
-        print(f"  [{name}] exists — skipped")
+    if is_complete(outdir):
+        print(f"  [{name}] complete — skipped")
         return
     outdir.mkdir(parents=True, exist_ok=True)
     t0 = time.perf_counter()
 
-    brief = await gen_brief(name, idea)
-    (outdir / "brief.json").write_text(json.dumps(brief, indent=2, ensure_ascii=False), encoding="utf-8")
-    docs = await gen_docs(name, brief)
-    for key, text in docs.items():
-        (outdir / f"{key}.md").write_text(text, encoding="utf-8")
+    # resume within a project: keep whatever survived the last interruption
+    brief_path = outdir / "brief.json"
+    if brief_path.exists():
+        brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    else:
+        brief = await gen_brief(name, idea)
+        brief_path.write_text(json.dumps(brief, indent=2, ensure_ascii=False), encoding="utf-8")
+    docs = await gen_docs(name, brief, outdir)
 
-    planted: list[dict] = []
+    # partial defect state survives interruptions too (defects.json is the
+    # completion marker, so it is only written once the loop finishes)
+    partial = outdir / "defects.partial.json"
+    planted: list[dict] = json.loads(partial.read_text(encoding="utf-8")) if partial.exists() else []
+    done_types = {d["type"] for d in planted}
     types = rng.sample(list(DEFECT_TYPES), k=min(defects_per_project, len(DEFECT_TYPES)))
     for defect_type in types:
+        if defect_type in done_types:
+            continue
         doc_key = rng.choice(DEFECT_TARGET_DOCS[defect_type])
         result = await plant_defect(doc_key, docs[doc_key], defect_type)
         if result is None:
@@ -205,7 +233,9 @@ async def build_project(name: str, idea: str, defects_per_project: int, rng: ran
         (outdir / f"{stem}.md").write_text(result["document"], encoding="utf-8")
         planted.append({k: result[k] for k in ("doc", "type", "planted_quote", "note")}
                        | {"file": f"{stem}.md"})
+        partial.write_text(json.dumps(planted, indent=2, ensure_ascii=False), encoding="utf-8")
     (outdir / "defects.json").write_text(json.dumps(planted, indent=2, ensure_ascii=False), encoding="utf-8")
+    partial.unlink(missing_ok=True)
     print(f"  [{name}] 5 docs + {len(planted)}/{len(types)} defects in {time.perf_counter() - t0:.0f}s")
 
 
@@ -217,7 +247,7 @@ async def main() -> None:
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    todo = [s for s in SEED_IDEAS if not (DATA / "projects" / s[0] / "brief.json").exists()]
+    todo = [s for s in SEED_IDEAS if not is_complete(DATA / "projects" / s[0])]
     todo = todo[: args.projects]
     print(f"building {len(todo)} synthetic project(s): {[n for n, _ in todo]}")
     for name, idea in todo:
