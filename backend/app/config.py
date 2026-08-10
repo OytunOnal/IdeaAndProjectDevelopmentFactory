@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # frontier chain as fallback (availability over purity; fallbacks logged).
     llm_role_providers: str = ""
     llm_role_think: str = ""
+    # Decomposed Devil's Advocate (Phase 3): six local micro-passes replace
+    # the monolithic frontier DA call. Opt-in; the monolithic path remains
+    # the automatic fallback if the decomposed run fails.
+    da_decomposed: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

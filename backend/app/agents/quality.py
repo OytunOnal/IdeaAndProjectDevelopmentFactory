@@ -12,6 +12,7 @@ from app.agents.common import (
 )
 from app.agents.llm import call_llm
 from app.agents.state import ProjectState
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -169,10 +170,58 @@ async def quality_reviewer_node(state: ProjectState) -> ProjectState:
 
 
 async def devils_advocate_node(state: ProjectState) -> ProjectState:
+    if settings.da_decomposed:
+        result = await _decomposed_da_node(state)
+        if result is not None:
+            return result
+        logger.warning("Decomposed DA failed — falling back to the monolithic path")
     return await _run_report_agent(
         state, "devils_advocate", DEVILS_ADVOCATE_PROMPT,
         "devils_advocate", "Devil's Advocate Report", "😈",
     )
+
+
+_SPEC_KEYS = ("prd", "architecture", "ux_design", "gtm_strategy", "financial_model")
+_RESEARCH_KEYS = ("market_research", "competitor_analysis", "tech_feasibility")
+
+
+async def _decomposed_da_node(state: ProjectState) -> ProjectState | None:
+    """Phase 3 path: six local micro-passes composed into the DA report.
+
+    Returns None on failure so the caller can fall back to the monolithic
+    path — availability over purity, same policy as role routing."""
+    from app.agents.decomposed_da import compose_production_report, run_decomposed_da
+
+    await emit_progress(
+        state, "devils_advocate",
+        "😈 Running the decomposed adversarial review (local micro-passes)...",
+    )
+    docs = {k: state.get(k) or "" for k in (*_SPEC_KEYS, *_RESEARCH_KEYS)}
+    try:
+        stats: dict = {}
+        findings, _ = await run_decomposed_da(
+            docs, brief=state.get("idea_brief"), audit_keys=_SPEC_KEYS, stats=stats,
+        )
+        report = compose_production_report(findings)
+        logger.info(f"Decomposed DA: {stats}")
+    except Exception as e:
+        logger.error(f"Decomposed DA failed: {e}", exc_info=True)
+        return None
+    return {
+        **state,
+        "devils_advocate": report,
+        "messages": agent_message(
+            state, "devils_advocate",
+            "😈 **Devil's Advocate Report ready** (decomposed local review — "
+            f"{len(findings)} substantiated finding(s)) — see "
+            f"`{DOC_PATHS.get('devils_advocate', '')}` in the files panel.",
+        ),
+        "current_agent": "devils_advocate",
+        "pipeline_status": "running",
+        # dozens of small local calls; counted as one unit — the counter
+        # tracks API-cost-relevant work and these run on the user's machine
+        "total_llm_calls": state.get("total_llm_calls", 0) + 1,
+    }
 
 
 async def consistency_checker_node(state: ProjectState) -> ProjectState:

@@ -1296,6 +1296,55 @@ def compose_report(findings: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _adjustment_for(f: dict) -> str:
+    """Deterministic Recommended-Adjustment text for a finding."""
+    kind = f.get("kind")
+    if kind == "arithmetic":
+        return (f"Correct the arithmetic in {f['doc']}: the stated {f['claimed']:g} "
+                f"conflicts with its own inputs (`{f['expression']}` = {f['computed']:g}).")
+    if kind == "unsupported-evidence":
+        return (f"Remove or properly source the unsupported claim in {f['doc']}: "
+                f"\"{f['quote'][:90]}\"")
+    if kind == "missing-critical":
+        return f"Add substantive {f['topic']} coverage to the specifications ({f['detail']})"
+    if kind == "cross-doc-inconsistency":
+        return (f"Align the conflicting values across {f['doc']}: "
+                f"{f['values'][0]:g} vs {f['values'][1]:g} ({f['unit']}).")
+    if kind == "out-of-scope-reference":
+        return (f"Remove \"{f['feature']}\" from {f['doc']} or bring it into the "
+                f"PRD's v1 scope explicitly.")
+    return f"Resolve in {f['doc']}: {f['issue']}"
+
+
+_HIGH_RISK_KINDS = {"arithmetic", "missing-critical", "internal-contradiction",
+                    "unsupported-evidence"}
+
+
+def compose_production_report(findings: list[dict]) -> str:
+    """Production-shaped DA report: the composed evidence report plus the
+    RISK line and the Recommended Adjustments section the product's
+    apply-flow consumes — all deterministic."""
+    report = compose_report(findings)
+    if any(f.get("kind") in _HIGH_RISK_KINDS for f in findings) or len(findings) >= 5:
+        risk = "HIGH"
+    elif findings:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
+    lines = [report.rstrip(), "", f"RISK: {risk}", "", "## Recommended Adjustments", ""]
+    if not findings:
+        lines.append("None — the current direction holds up.")
+    else:
+        ordered = sorted(
+            findings,
+            key=lambda f: next((i for i, (k, _) in enumerate(_SECTION_ORDER)
+                                if k == f.get("kind")), len(_SECTION_ORDER)),
+        )
+        for i, f in enumerate(ordered[:3], 1):
+            lines.append(f"{i}. {_adjustment_for(f)}")
+    return "\n".join(lines) + "\n"
+
+
 async def run_decomposed_da(
     docs: dict[str, str],
     brief: dict | None = None,

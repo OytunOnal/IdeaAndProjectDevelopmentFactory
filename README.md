@@ -79,8 +79,8 @@ decisions fell out of the numbers:
 | Config | Intent role (68-case golden set) | Generator roles (10 spec docs, fixed-context, judged) | Adversarial-review role (15 seeded defects) |
 |---|---|---|---|
 | Frontier API (fallback chain) | 87% | strongest breadth (14-story PRDs) | 77% → **100%** after a measured prompt upgrade* |
-| **qwen3:8b, thinking on — runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | unfit: arithmetic incoherence in the financial model, fabricated a cited stat | 27% → 57%* — stays frontier |
-| **qwen3.6:35b, thinking on — runs the 5 spec generators** | 81% | **at/near frontier parity**; best-in-eval financial model (only fully consistent numeric chain) | ~50%, unstable empty-output — stays frontier |
+| **qwen3:8b, thinking on — runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | unfit: arithmetic incoherence in the financial model, fabricated a cited stat | 27% → 57%* as a monolithic call — now runs five of the six decomposed passes (below) |
+| **qwen3.6:35b, thinking on — runs the 5 spec generators** | 81% | **at/near frontier parity**; best-in-eval financial model (only fully consistent numeric chain) | ~50% unstable as a monolithic call — now judges the open-critique pass (below) |
 | deepseek-r1:7b | 51% | unfit: generic, ungrounded output | 3% — "reasoning model ⇒ good reviewer" falsified |
 
 <sub>*development-set numbers — the prompts were tuned against these fixtures;
@@ -100,6 +100,25 @@ instruction or a question to answer first?", "which document does this change
 belong to?". It exploits the measured asymmetry that small models are weak at
 broad action parsing but near-frontier on narrow questions — and local
 inference makes the extra calls free.
+
+### The adversarial review went local by decomposition, not by model swap
+
+The "criticize everything" Devil's Advocate was the table's worst cell — no
+local model survived it as a single call. The migrated version
+(`DA_DECOMPOSED=true`) splits it into **six micro-passes ordered by
+verifiability**, each with the same skeleton: a narrow LLM extraction, code
+that validates every claim (verbatim-quote grounding, AST-evaluated
+arithmetic, unit-family pairing, derivation guards), majority-voted narrow
+verification, and a deterministic report where every finding carries its
+evidence. Five passes run on the 8B model; only the open-critique judge
+needs the 35B — the measured boundary is narrow-factual questions (8B
+reliable) vs evaluative judgment (8B undiscriminating in every prompt
+framing tried). On a **sealed held-out set** — two unseen domains, 15 fresh
+seeded defects, one run, no iteration — the decomposed system caught 11-12
+of 15 with no drop from its development band: the recall of the frontier
+monolithic baseline, on a fully local runtime. The false-positive gaps the
+held-out run exposed are locked as deterministic unit tests, and the
+monolithic path remains the automatic fallback.
 
 The full trail: [`EVAL_PLAN.md`](EVAL_PLAN.md) (design for all 29 nodes) ·
 [`backend/evals/REPORT.md`](backend/evals/REPORT.md) (role × model matrix and
@@ -258,9 +277,9 @@ against Ollama or the frontier chain and write scored JSON reports.
   any general claim; known remaining classes ("the spec"→PRD mapping,
   conditional branch-guessing, multi-document edits in one message) are parked
   for distillation or feature work rather than more prompt surgery.
-- The discussion/intent role and the five spec generator roles run local;
-  the reviewer roles (adversarial review, consistency, LLM-judge) measured
-  below the bar and stay on the frontier chain
+- The discussion/intent role, the five spec generators, and (opt-in,
+  decomposed) the adversarial review run local; the consistency-checker and
+  LLM-judge roles stay on the frontier chain pending their own evals
   ([REPORT.md](backend/evals/REPORT.md) has the numbers and why).
 - Free-tier rate limits are real: context windows sent to quality agents are
   truncated to fit Groq's 6k TPM; a paid key removes the constraint.
