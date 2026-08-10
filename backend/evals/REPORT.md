@@ -227,3 +227,60 @@ max_tokens raised 6144→8192 (specification.py). Original recommendation:
 all five spec generator roles → qwen3.6:35b (think-on); keep frontier as fallback chain.
 Latency note: 35B averages 210s/doc vs frontier 9s — acceptable for offline document
 generation, relevant if UX expects fast turnaround.
+
+
+---
+
+# Phase 3 — Decomposed Devil's Advocate (quality roles)
+
+The monolithic "criticize everything" DA was the measured weak spot of local
+models (8B 27% with trust violations; 35B ~50% unstable; frontier 77%
+pre-upgrade). Phase 3 decomposed it into SIX micro-passes ordered by
+verifiability, each built on the same skeleton: narrow LLM extraction →
+code-side validation (verbatim-quote grounding, number grounding) → narrow
+verification questions with 3-vote majority → deterministic composition
+(no synthesis call; every finding carries its evidence).
+
+| Pass | Owns | Mechanism | Model |
+|---|---|---|---|
+| numeric | arithmetic, impossible-math | LLM converts claims to expressions; Python (ast safe_eval) verdicts | 8B |
+| evidence | fabricated first-party evidence | extract → completed-claim gate → per-claim support check vs bundle | 8B |
+| absence | missing-critical sections | short checklist; applicability gate; presence votes must quote | 8B |
+| consistency | cross-doc value drift | fact rows → unit-family pairing (code) → derivation guard (code) → same-quantity vote | 8B |
+| scope | out-of-scope references | PRD exclusion list → per-(feature×doc) presence vote with proof quote | 8B |
+| critique | contradictions, infeasibility, absurd targets, audience | per-doc candidates → two-sided genuineness judge, majority | 35B gen+judge, repeats=2 |
+
+Dev-set results (15 seeded defects, clean bundles for FP): single-run recall
+~11-13/15 with 0-2 clean FPs; parked after exhaustive measurement: A4
+(context-established identities — six configurations tried) and A1-class
+single-run variance. Key measured lessons: the fast model is reliable at
+narrow-factual questions and unusable for evaluative judgment in ANY prompt
+framing (the boundary that routes critique to the quality model); one-sided
+verifier policies oscillate (reproduced twice; two-sided + majority is the
+cure, again); worked examples beat abstract rules, but example content must
+be decontaminated from fixtures (caught once by the user) and example
+patterns silently define coverage.
+
+## Held-out verdict (sealed single shot, 2026-08-08, config @ e041e5e)
+
+Two unseen domains (consumer edtech with minors; P2P equipment marketplace),
+15 fresh defects mirroring the dev distribution. Result:
+
+- **Recall 11-12/15 — no drop from the dev band.** Hits spread across all
+  six passes, including the scope pass added the day before (C7 caught with
+  proof quote). At the frontier monolithic baseline (77%) with a fully
+  local runtime.
+- **Clean-bundle FPs rose to 9** (dev band: 0-2). Clustered causes, all now
+  known-issue backlog: numeric cross-line chains picking wrong partners (a
+  measured cost of the revenue-chain worked example), degenerate same-quote
+  consistency pairs (a code gap dev's short docs never triggered), critique
+  judge noise. Precision guards were dev-calibrated; recall architecture
+  generalizes.
+- Misses: C8 absurd-target (the most resistant class on dev too), D5
+  take-rate pair (consistency sampling), D6 (partly a fixture-authoring
+  flaw — the seeded removal left waiver traces in other docs).
+
+Verdict: the decomposition thesis holds — catch capability generalizes;
+FP hardening continues on dev (this held-out set is retired for the
+precision-affected classes per HELDOUT.md). Durable fixes for parked
+classes and judge variance are Phase 4 distillation targets.

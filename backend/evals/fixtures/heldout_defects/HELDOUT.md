@@ -46,4 +46,4 @@ comparable).
 
 | Date | Role family | Configuration | Purpose | Result recorded in |
 |---|---|---|---|---|
-| (none yet) | | | | |
+| 2026-08-08 | Adversarial review (decomposed DA, 6 passes) | Frozen at commit e041e5e: five narrow passes on qwen3:8b, open-critique gen+judge on qwen3.6:35b (repeats=2); composed via run_decomposed_da | Phase 3 verdict — single shot, dev band ~11-13/15 & 0-2 clean FP | evals/REPORT.md (Phase 3 section) |
