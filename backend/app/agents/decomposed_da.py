@@ -706,17 +706,27 @@ def _unit_family(unit: str) -> tuple[str, str]:
 # picks the self-consistent rate, catch is luck). The frozen config is the
 # bare question. Durable fix: distillation (Phase 4) or the open-critique
 # pass; not more prompt surgery here.
-def is_derived(a: dict, b: dict, fact_values: list[float], rel_tolerance: float = 0.05) -> bool:
+def is_derived(a: dict, b: dict, facts: list[dict], rel_tolerance: float = 0.05) -> bool:
     """True when one value is (approximately) the other times some stated
-    fact — e.g. $120/fleet = $8/van × 15 vans (avg fleet size). Such pairs
-    are DERIVATIONS, not inconsistencies; measured as the pass's main FP
-    source. Code decides — no vote involved."""
+    COUNT-like fact — e.g. $120/fleet = $8/van × 15 vans (avg fleet size).
+    Such pairs are DERIVATIONS, not inconsistencies; measured as the pass's
+    main FP source. Code decides — no vote involved.
+
+    Multiplier candidates are restricted to facts whose unit family differs
+    from the pair's (a money pair is multiplied by a count, never by another
+    money value). Measured edge this fixes: a fleet COUNT of 120 and a fleet
+    revenue of $120 collide numerically — the old value-based exclusion
+    disabled the guard exactly when the multiplier equaled a pair value."""
     va, vb = float(a["value"]), float(b["value"])
     lo, hi = sorted((abs(va), abs(vb)))
     if lo == 0:
         return False
-    for f in fact_values:
-        if f <= 1 or f in (va, vb):
+    pair_family = _unit_family(a["unit"])
+    for fact in facts:
+        if _unit_family(fact["unit"]) == pair_family:
+            continue  # same-family values are comparands, not multipliers
+        f = float(fact["value"])
+        if f <= 1:
             continue
         if abs(hi - lo * f) / hi <= rel_tolerance:
             return True
@@ -786,8 +796,7 @@ async def consistency_audit(
                               "concept": item["concept"], "value": float(item["value"]),
                               "unit": item["unit"]})
 
-    fact_values = [f["value"] for f in facts]
-    pairs = [(a, b) for a, b in candidate_pairs(facts) if not is_derived(a, b, fact_values)]
+    pairs = [(a, b) for a, b in candidate_pairs(facts) if not is_derived(a, b, facts)]
     findings: list[dict] = []
     for a, b in pairs:
         votes_s: list[bool] = []
@@ -899,6 +908,7 @@ async def critique_audit(
     audit_keys: tuple[str, ...] | None = None,
     samples: int = 3,
     votes: int = 3,
+    gen_tier: int = 2,
     judge_tier: int = 2,
     repeats: int = 1,
     stats: dict | None = None,
@@ -922,7 +932,7 @@ async def critique_audit(
     agg = {"candidates": 0, "candidate_quotes": []}
     for _ in range(max(1, repeats)):
         rep_stats: dict = {}
-        findings = await _critique_once(docs, audit_keys, samples, votes, judge_tier, rep_stats)
+        findings = await _critique_once(docs, audit_keys, samples, votes, gen_tier, judge_tier, rep_stats)
         agg["candidates"] += rep_stats.get("candidates", 0)
         agg["candidate_quotes"].extend(rep_stats.get("candidate_quotes", []))
         for f in findings:
@@ -941,6 +951,7 @@ async def _critique_once(
     audit_keys: tuple[str, ...] | None,
     samples: int,
     votes: int,
+    gen_tier: int,
     judge_tier: int,
     stats: dict | None,
 ) -> list[dict]:
@@ -959,7 +970,7 @@ async def _critique_once(
                         {"role": "system", "content": _CRITIQUE_PROMPT},
                         {"role": "user", "content": f"Document ({doc_key}):\n\n{doc_text}"},
                     ],
-                    model_tier=2, temperature=0.7, max_tokens=1536,
+                    model_tier=gen_tier, temperature=0.7, max_tokens=1536,
                     role="audit", think=False,
                 )
             except Exception as e:
@@ -1016,6 +1027,243 @@ async def _critique_once(
             "candidate_quotes": [c["quote"][:90] for c in candidates],
         })
     return findings
+
+
+# ── pass 6: scope echo ─────────────────────────────────────────────────────
+#
+# Targets out-of-scope references: the PRD explicitly excludes a feature
+# from v1, and another document quietly designs or sells it anyway. Both
+# stages are narrow-factual (the measured safe zone for the fast model):
+# extract the PRD's exclusion list, then ask per (feature × other doc)
+# whether that doc describes the feature as part of the product — with the
+# usual guards (verbatim quote required for a positive vote, 3-vote
+# majority, mention-as-excluded doesn't count).
+
+_SCOPE_EXTRACT_PROMPT = """You are a scope-list extractor. From the PRD below, extract the features EXPLICITLY EXCLUDED from the current version (v1) — the "Out of scope" / "Won't have" / "Out (v1)" items.
+
+Rules:
+- "feature": the excluded item as a short phrase, close to the document's own wording.
+- Only items the PRD itself excludes; do not infer.
+
+Respond with ONLY a fenced JSON array (no commentary):
+```json
+[{"feature": "group study rooms"}, {"feature": "native tablet apps"}]
+```
+If the PRD has no exclusion list, respond with an empty array."""
+
+_SCOPE_PRESENT_PROMPT = """Answer one narrow question about one specification document.
+
+The product's PRD explicitly EXCLUDES this feature from v1: "{feature}"
+
+Does the document below DESCRIBE OR SPECIFY this feature as part of the product's v1 experience — a flow, screen, plan, or design for it? Mentioning the feature as excluded/future/a competitor's does NOT count; only treating it as something the product ships.
+
+Rules:
+- If present: "quote" must be a VERBATIM sentence from the document proving it.
+- If not present: "quote" is "".
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"present": true/false, "quote": "..."}}
+```"""
+
+
+async def scope_audit(
+    docs: dict[str, str],
+    audit_keys: tuple[str, ...] | None = None,
+    prd_key: str = "prd",
+    samples: int = 2,
+    votes: int = 3,
+    stats: dict | None = None,
+) -> list[dict]:
+    """Run the scope-echo micro-pass: PRD exclusions vs the other docs."""
+    audit_keys = audit_keys or tuple(docs)
+    prd_text = docs.get(prd_key) or ""
+    if not prd_text.strip():
+        return []
+
+    features: list[str] = []
+    for _ in range(samples):
+        try:
+            reply = await call_llm(
+                messages=[
+                    {"role": "system", "content": _SCOPE_EXTRACT_PROMPT},
+                    {"role": "user", "content": f"PRD:\n\n{prd_text}"},
+                ],
+                model_tier=2, temperature=0.3, max_tokens=512,
+                role="audit", think=False,
+            )
+        except Exception as e:
+            logger.warning(f"scope_audit extraction failed: {e}")
+            continue
+        for item in _parse_items(reply):
+            feature = item.get("feature", "")
+            if not feature or not isinstance(feature, str):
+                continue
+            key = _normalize_ws(feature).lower()
+            if any(key in s or s in key for s in map(str.lower, map(_normalize_ws, features))):
+                continue
+            features.append(feature)
+
+    findings: list[dict] = []
+    for feature in features:
+        for doc_key in audit_keys:
+            if doc_key == prd_key:
+                continue
+            doc_text = docs.get(doc_key) or ""
+            if not doc_text.strip():
+                continue
+            votes_p: list[bool] = []
+            proof = ""
+            for _ in range(votes):
+                try:
+                    reply = await call_llm(
+                        messages=[
+                            {"role": "system", "content": _SCOPE_PRESENT_PROMPT.format(feature=feature)},
+                            {"role": "user", "content": f"Document ({doc_key}):\n\n{doc_text}"},
+                        ],
+                        model_tier=2, temperature=0.3, max_tokens=384,
+                        role="audit", think=False,
+                    )
+                    data = _parse_json_object(reply)
+                    present = data.get("present") if data else None
+                    if not isinstance(present, bool):
+                        continue
+                    if present:
+                        quote = data.get("quote", "")
+                        # a positive vote must prove itself with a real quote
+                        if not quote or _normalize_ws(quote) not in _normalize_ws(doc_text):
+                            logger.debug(f"scope_audit: present-vote without valid quote dropped ({doc_key})")
+                            continue
+                        proof = quote
+                        votes_p.append(True)
+                    else:
+                        votes_p.append(False)
+                except Exception as e:
+                    logger.warning(f"scope_audit presence failed: {e}")
+            if votes_p and sum(votes_p) * 2 > len(votes_p):  # majority present
+                findings.append({
+                    "kind": "out-of-scope-reference",
+                    "doc": doc_key,
+                    "feature": feature,
+                    "issue": f'The PRD excludes "{feature}" from v1, but this document specifies it.',
+                    "quote": proof,
+                })
+    if stats is not None:
+        stats.update({"excluded_features": len(features), "findings": len(findings)})
+    return findings
+
+
+# ── composition ────────────────────────────────────────────────────────────
+
+_SECTION_ORDER = (
+    ("arithmetic", "Numeric audit — computed, not opined"),
+    ("unsupported-evidence", "Unsupported evidence"),
+    ("missing-critical", "Missing critical coverage"),
+    ("cross-doc-inconsistency", "Cross-document inconsistencies"),
+    ("out-of-scope-reference", "Scope violations"),
+    ("internal-contradiction", "Internal contradictions"),
+    ("infeasible-tech", "Technical feasibility"),
+    ("infeasible-plan", "Plan feasibility"),
+    ("absurd-target", "Target realism"),
+    ("audience-mismatch", "Audience fit"),
+)
+
+
+def compose_report(findings: list[dict]) -> str:
+    """Render all micro-pass findings as one Devil's Advocate report.
+
+    Deliberately deterministic — no synthesis call. Every line carries its
+    evidence (quote or computation), grouped by finding kind; a clean bundle
+    yields an honest short report, not manufactured criticism."""
+    lines = ["# Devil's Advocate Report", ""]
+    total = len(findings)
+    if total == 0:
+        lines.append(
+            "No substantiated findings. Every check in the decomposed review "
+            "(numeric audit, evidence audit, absence scan, cross-document "
+            "consistency, open critique) came back clean. Absence of findings "
+            "is a real result here, not a skipped review."
+        )
+        return "\n".join(lines)
+
+    lines.append(f"{total} substantiated finding(s). Every finding carries its evidence.\n")
+    for kind, title in _SECTION_ORDER:
+        section = [f for f in findings if f.get("kind") == kind]
+        if not section:
+            continue
+        lines.append(f"## {title}")
+        for f in section:
+            if kind == "arithmetic":
+                lines.append(
+                    f"- **{f['doc']}** — claims **{f['claimed']:g}** but its own inputs "
+                    f"compute to **{f['computed']:g}** (`{f['expression']}`). "
+                    f"Quote: \"{f['quote']}\""
+                )
+            elif kind == "unsupported-evidence":
+                lines.append(
+                    f"- **{f['doc']}** — presupposes evidence no document supports "
+                    f"({f['asserts']}). Quote: \"{f['quote']}\""
+                )
+            elif kind == "missing-critical":
+                lines.append(f"- **{f['topic']}** — {f['detail']}")
+            elif kind == "cross-doc-inconsistency":
+                lines.append(
+                    f"- **{f['doc']}** — the same quantity is stated as "
+                    f"**{f['values'][0]:g}** and **{f['values'][1]:g}** ({f['unit']}). "
+                    f"Quote: \"{f['quote']}\""
+                )
+            else:  # critique kinds
+                lines.append(f"- **{f['doc']}** — {f['issue']} Quote: \"{f['quote']}\"")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+async def run_decomposed_da(
+    docs: dict[str, str],
+    brief: dict | None = None,
+    audit_keys: tuple[str, ...] | None = None,
+    stats: dict | None = None,
+) -> tuple[list[dict], str]:
+    """Run all five micro-passes over a bundle and compose the DA report.
+
+    `docs` may include research documents; `audit_keys` names the spec docs
+    under review (defaults to every key). Findings are cross-pass deduped by
+    quote containment — passes intentionally overlap on planted-defect
+    echoes (redundancy is a recall feature, duplicate lines in the report
+    are not)."""
+    audit_keys = audit_keys or tuple(docs)
+    spec_docs = {k: docs[k] for k in audit_keys if docs.get(k)}
+
+    # Frozen per-pass model routing (dev-set measured): the four narrow
+    # passes run on the fast model (tier 2); the open-critique pass needs the
+    # quality model (tier 1) for BOTH generation and judging — the fast
+    # model's genuineness judgment discriminated in no framing tried.
+    per_pass: dict[str, list[dict]] = {}
+    per_pass["numeric"] = await numeric_audit(spec_docs)
+    per_pass["evidence"] = await evidence_audit(docs, audit_keys=audit_keys)
+    per_pass["absence"] = await absence_audit(docs, brief=brief, audit_keys=audit_keys)
+    per_pass["consistency"] = await consistency_audit(spec_docs)
+    per_pass["scope"] = await scope_audit(spec_docs)
+    # repeats=2: single-run critique recall oscillates (3-5 of 6 on dev) from
+    # two-layer sampling; the union stabilizes it and the composed clean runs
+    # absorb the occasional single FP
+    per_pass["critique"] = await critique_audit(spec_docs, gen_tier=1, judge_tier=1, repeats=2)
+
+    merged: list[dict] = []
+    seen_quotes: set[str] = set()
+    for name in ("numeric", "evidence", "absence", "consistency", "scope", "critique"):
+        for f in per_pass[name]:
+            quote = f.get("quote", "")
+            if quote:
+                key = _normalize_ws(quote).lower()
+                if any(key in s or s in key for s in seen_quotes):
+                    continue
+                seen_quotes.add(key)
+            merged.append(f)
+    if stats is not None:
+        stats.update({name: len(fs) for name, fs in per_pass.items()})
+        stats["merged"] = len(merged)
+    return merged, compose_report(merged)
 
 
 def format_numeric_findings(findings: list[dict]) -> str:

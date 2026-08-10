@@ -139,6 +139,31 @@ def test_parse_items_garbage():
     assert _parse_items('{"not": "array"}') == []
 
 
+# ── composition ────────────────────────────────────────────────────────────
+
+def test_compose_report_empty_is_honest():
+    from app.agents.decomposed_da import compose_report
+    report = compose_report([])
+    assert "No substantiated findings" in report
+    assert "not a skipped review" in report
+
+
+def test_compose_report_groups_and_carries_evidence():
+    from app.agents.decomposed_da import compose_report
+    findings = [
+        {"kind": "arithmetic", "doc": "financial_model", "quote": "LTV:CAC 3.6:1",
+         "expression": "35 / 40", "computed": 0.875, "claimed": 3.6},
+        {"kind": "missing-critical", "topic": "privacy-compliance", "detail": "No spec doc addresses it"},
+        {"kind": "audience-mismatch", "doc": "ux_design", "quote": "CLI only",
+         "issue": "CLI-only UI for non-technical users."},
+    ]
+    report = compose_report(findings)
+    assert "3 substantiated finding(s)" in report
+    assert "Numeric audit" in report and "0.875" in report and "35 / 40" in report
+    assert "Missing critical coverage" in report and "privacy-compliance" in report
+    assert "Audience fit" in report and "CLI only" in report
+
+
 # ── evidence pass: verdict parsing + vote merge ───────────────────────────
 
 def test_parse_verdict_fenced_and_bare():
@@ -180,14 +205,36 @@ def test_candidate_pairs_unit_family_bridges_tag_drift():
 
 def test_is_derived_guard():
     from app.agents.decomposed_da import is_derived
-    a = {"value": 8}   # $8/van
-    b = {"value": 120}  # $120/fleet
-    # 120 = 8 × 15 where 15 (avg fleet size) is a stated fact → derivation
-    assert is_derived(a, b, [8, 120, 15, 25]) is True
-    # 8 vs 15 (the real price mismatch): no fact ≈ 1.875 → NOT derived
-    assert is_derived({"value": 8}, {"value": 15}, [8, 15, 120, 25]) is False
-    # the pair's own values don't count as multipliers
-    assert is_derived({"value": 2}, {"value": 30}, [2, 30]) is False
+    facts = [
+        {"value": 8, "unit": "USD/van/month"},
+        {"value": 120, "unit": "USD/month"},
+        {"value": 15, "unit": "vans"},
+        {"value": 25, "unit": "percent"},
+    ]
+    a = {"value": 8, "unit": "USD/van/month"}
+    b = {"value": 120, "unit": "USD/month"}
+    # 120 = 8 × 15 where 15 vans (cross-unit count) is a stated fact → derivation
+    assert is_derived(a, b, facts) is True
+    # 8 vs 15 (the real price mismatch): no cross-unit fact ≈ 1.875 → NOT derived
+    assert is_derived({"value": 8, "unit": "USD/van/month"},
+                      {"value": 15, "unit": "USD/van/month"}, facts) is False
+    # same-family values never act as multipliers (money × money is meaningless)
+    assert is_derived({"value": 2, "unit": "USD"}, {"value": 30, "unit": "USD"},
+                      [{"value": 15, "unit": "USD"}]) is False
+
+
+def test_is_derived_count_value_collision():
+    from app.agents.decomposed_da import is_derived
+    # measured leak: fleet COUNT 120 and fleet revenue $120 collide numerically;
+    # 14,400 MRR = $120/fleet × 120 fleets must still register as derived
+    facts = [
+        {"value": 120, "unit": "USD/month"},
+        {"value": 120, "unit": "fleets"},
+        {"value": 14400, "unit": "USD/month"},
+    ]
+    a = {"value": 120, "unit": "USD/month"}
+    b = {"value": 14400, "unit": "USD/month"}
+    assert is_derived(a, b, facts) is True
 
 
 def test_candidate_pairs_ranks_token_overlap_first():

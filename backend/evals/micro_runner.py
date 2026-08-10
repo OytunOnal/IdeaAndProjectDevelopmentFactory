@@ -25,6 +25,8 @@ from app.agents.decomposed_da import (
     critique_audit,
     evidence_audit,
     numeric_audit,
+    run_decomposed_da,
+    scope_audit,
 )
 from evals.defect_runner import BRIEFS, FIXTURES_ROOT, SETS, load_bundle, model_label
 
@@ -32,7 +34,7 @@ RESULTS = Path(__file__).parent / "results" / "micro"
 
 RESEARCH_KEYS = ("market_research", "competitor_analysis", "tech_feasibility")
 
-PASSES = ("numeric", "evidence", "absence", "consistency", "critique")
+PASSES = ("numeric", "evidence", "absence", "consistency", "scope", "critique", "full")
 
 # Defect types each pass is RESPONSIBLE for (recall is scored against these
 # only; other defect types are other passes' jobs).
@@ -43,6 +45,8 @@ PASS_SCOPE = {
     "consistency": ("cross-doc-inconsistency",),
     "critique": ("internal-contradiction", "infeasible-tech", "absurd-target",
                  "audience-mismatch", "infeasible-plan"),
+    "scope": ("out-of-scope-reference",),
+    "full": None,  # composed run: in scope = every defect type
 }
 
 
@@ -50,7 +54,17 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
     docs = load_bundle(project, variant, manifest, fixtures)
     t0 = time.perf_counter()
     stats: dict = {}
-    if pass_name == "evidence":
+    report = None
+    if pass_name == "full":
+        research = {
+            key: path.read_text(encoding="utf-8")
+            for key in RESEARCH_KEYS
+            if (path := fixtures / project / f"{key}.md").exists()
+        }
+        findings, report = await run_decomposed_da(
+            {**research, **docs}, brief=BRIEFS[project], audit_keys=tuple(docs), stats=stats
+        )
+    elif pass_name == "evidence":
         # research docs join the bundle as verification sources; only the
         # spec docs (the defect surface) are audited for claims
         research = {
@@ -61,6 +75,8 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
         findings = await evidence_audit({**research, **docs}, audit_keys=tuple(docs), stats=stats)
     elif pass_name == "consistency":
         findings = await consistency_audit(docs, stats=stats)
+    elif pass_name == "scope":
+        findings = await scope_audit(docs, stats=stats)
     elif pass_name == "critique":
         judge_tier = int(os.environ.get("CRITIQUE_JUDGE_TIER", "2"))
         c_samples = int(os.environ.get("CRITIQUE_SAMPLES", "3"))
@@ -81,9 +97,10 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
         findings = await numeric_audit(docs)
     seconds = round(time.perf_counter() - t0, 1)
 
+    scope = PASS_SCOPE[pass_name]
     in_scope = [
         d for d in manifest
-        if d["project"] == project and d["type"] in PASS_SCOPE[pass_name]
+        if d["project"] == project and (scope is None or d["type"] in scope)
     ]
     result = {
         "pass": pass_name, "project": project, "variant": variant,
@@ -96,6 +113,8 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
     outdir.mkdir(parents=True, exist_ok=True)
     stem = f"{pass_name}_{project}_{variant}"
     (outdir / f"{stem}.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    if report is not None:
+        (outdir / f"{stem}_report.md").write_text(report, encoding="utf-8")
 
     if "claims_extracted" in stats:
         stage = f"  [extracted {stats['claims_extracted']} → gated {stats['claims_gated_in']}]"
@@ -103,6 +122,11 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
         stage = f"  [checklist {stats['checklist_items']} → applicable {stats['applicable_items']}]"
     elif "facts_extracted" in stats:
         stage = f"  [facts {stats['facts_extracted']} → pairs {stats['pairs_compared']}]"
+    elif "merged" in stats:
+        stage = ("  [num {numeric} + evid {evidence} + abs {absence} + cons {consistency}"
+                 " + scope {scope} + crit {critique} → {merged}]").format(**stats)
+    elif "excluded_features" in stats:
+        stage = f"  [excluded features {stats['excluded_features']}]"
     elif "candidates" in stats:
         stage = f"  [candidates {stats['candidates']}]"
     else:
