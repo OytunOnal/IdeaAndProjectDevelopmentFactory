@@ -76,12 +76,13 @@ Every agent role is being migrated to **local models (Ollama)** — but only
 after it clears a measuring harness. The evals came first, the migration
 decisions fell out of the numbers:
 
-| Config | Intent role (68-case golden set) | Generator roles (10 spec docs, fixed-context, judged) | Adversarial-review role (15 seeded defects) |
+| Config | Intent role (68-case golden set) | Generator roles (10 spec docs, fixed-context, judged) | Adversarial review, as ONE monolithic call (15 seeded defects) |
 |---|---|---|---|
 | Frontier API (fallback chain) | 87% | strongest breadth (14-story PRDs) | 77% → **100%** after a measured prompt upgrade* |
-| **qwen3:8b, thinking on — runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | unfit: arithmetic incoherence in the financial model, fabricated a cited stat | 27% → 57%* as a monolithic call — now runs five of the six decomposed passes (below) |
-| **qwen3.6:35b, thinking on — runs the 5 spec generators** | 81% | **at/near frontier parity**; best-in-eval financial model (only fully consistent numeric chain) | ~50% unstable as a monolithic call — now judges the open-critique pass (below) |
+| **qwen3:8b, thinking on — runs the chat layer** | **90±1%** (7 rounds: 82→79→87→84→91→85→90) | unfit: arithmetic incoherence in the financial model, fabricated a cited stat | 27%, with fabricated citations — hopeless as a single call |
+| **qwen3.6:35b, thinking on — runs the 5 spec generators** | 81% | **at/near frontier parity**; best-in-eval financial model (only fully consistent numeric chain) | ~50%, unstable empty output |
 | deepseek-r1:7b | 51% | unfit: generic, ungrounded output | 3% — "reasoning model ⇒ good reviewer" falsified |
+| **Decomposed 6-pass review (8B + 35B) — runs the adversarial review today** | — | — | **11-12/15 on a sealed held-out set** — frontier-baseline recall, fully local runtime (story below) |
 
 <sub>*development-set numbers — the prompts were tuned against these fixtures;
 a held-out set decides any general claim. The caveat is stamped in the reports.</sub>
