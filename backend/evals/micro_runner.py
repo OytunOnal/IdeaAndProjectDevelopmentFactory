@@ -19,14 +19,20 @@ from pathlib import Path
 
 import yaml
 
-from app.agents.decomposed_da import absence_audit, consistency_audit, evidence_audit, numeric_audit
+from app.agents.decomposed_da import (
+    absence_audit,
+    consistency_audit,
+    critique_audit,
+    evidence_audit,
+    numeric_audit,
+)
 from evals.defect_runner import BRIEFS, FIXTURES_ROOT, SETS, load_bundle, model_label
 
 RESULTS = Path(__file__).parent / "results" / "micro"
 
 RESEARCH_KEYS = ("market_research", "competitor_analysis", "tech_feasibility")
 
-PASSES = ("numeric", "evidence", "absence", "consistency")
+PASSES = ("numeric", "evidence", "absence", "consistency", "critique")
 
 # Defect types each pass is RESPONSIBLE for (recall is scored against these
 # only; other defect types are other passes' jobs).
@@ -35,6 +41,8 @@ PASS_SCOPE = {
     "evidence": ("fabricated-evidence",),
     "absence": ("missing-critical",),
     "consistency": ("cross-doc-inconsistency",),
+    "critique": ("internal-contradiction", "infeasible-tech", "absurd-target",
+                 "audience-mismatch", "infeasible-plan"),
 }
 
 
@@ -53,6 +61,13 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
         findings = await evidence_audit({**research, **docs}, audit_keys=tuple(docs), stats=stats)
     elif pass_name == "consistency":
         findings = await consistency_audit(docs, stats=stats)
+    elif pass_name == "critique":
+        judge_tier = int(os.environ.get("CRITIQUE_JUDGE_TIER", "2"))
+        c_samples = int(os.environ.get("CRITIQUE_SAMPLES", "3"))
+        c_repeats = int(os.environ.get("CRITIQUE_REPEATS", "1"))
+        findings = await critique_audit(
+            docs, samples=c_samples, judge_tier=judge_tier, repeats=c_repeats, stats=stats
+        )
     elif pass_name == "absence":
         research = {
             key: path.read_text(encoding="utf-8")
@@ -88,6 +103,8 @@ async def run_one(pass_name: str, project: str, variant: str, manifest: list[dic
         stage = f"  [checklist {stats['checklist_items']} → applicable {stats['applicable_items']}]"
     elif "facts_extracted" in stats:
         stage = f"  [facts {stats['facts_extracted']} → pairs {stats['pairs_compared']}]"
+    elif "candidates" in stats:
+        stage = f"  [candidates {stats['candidates']}]"
     else:
         stage = ""
     print(f"  [{model_label()}] {stem}: {len(findings)} findings in {seconds}s{stage}")

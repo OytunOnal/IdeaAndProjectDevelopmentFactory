@@ -77,6 +77,15 @@ def test_validate_rejects_non_numeric_claim():
     assert "not numeric" in validate_item(item, DOC)
 
 
+def test_normalize_bridges_heading_label_quotes():
+    from app.agents.decomposed_da import _normalize_ws
+    doc = "## Targets\n- 10 million registered users by month 3 on a $500 total marketing budget"
+    quote = "Targets: 10 million registered users by month 3 on a $500 total marketing budget"
+    # measured: the model prefixes quotes with a section label; heading/bullet/
+    # colon punctuation must not break the verbatim check
+    assert _normalize_ws(quote) in _normalize_ws(doc)
+
+
 def test_validate_accepts_markdownless_quote():
     # models quote content without the doc's ** markers — must still match
     item = {"quote": "LTV:CAC ≈ 3.6 : 1 — healthy above the 3:1 rule-of-thumb threshold",

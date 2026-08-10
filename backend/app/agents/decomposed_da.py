@@ -80,9 +80,12 @@ def _grounded(value: float, doc_numbers: set[float], scaffolding: bool = True) -
 
 
 def _normalize_ws(text: str) -> str:
-    """Collapse whitespace AND markdown emphasis — models quote content, not
-    formatting, so `**bold**`/`` `code` `` must not break substring matching."""
-    return re.sub(r"\s+", " ", re.sub(r"[*`_]", "", text)).strip()
+    """Collapse whitespace AND formatting punctuation — models quote content,
+    not formatting: `**bold**`, heading markers, list bullets, and label
+    colons must not break substring matching (measured: a valid absurd-target
+    candidate was rejected for three rounds because the model wrote
+    "Targets: X" where the doc had "## Targets\\n- X")."""
+    return re.sub(r"\s+", " ", re.sub(r"[*`_#:;|•–—-]", "", text)).strip()
 
 
 def validate_item(item: dict, doc_text: str) -> str | None:
@@ -826,6 +829,191 @@ async def consistency_audit(
             "facts_detail": [
                 f"{f['doc']}[{f['concept']}={f['value']:g} {f['unit']}]" for f in facts
             ],
+        })
+    return findings
+
+
+# ── pass 5: open critique ──────────────────────────────────────────────────
+#
+# The one deliberately broad pass, for defect classes narrow questions can't
+# enumerate: internal contradictions, technically infeasible components,
+# absurd targets, audience mismatches, unrealistic plans. Two design moves
+# keep a small model viable where the monolithic DA failed: (1) the scope is
+# per-DOCUMENT (short context — the regime the model measures well in) and
+# excludes everything passes 1-4 own (no math, no evidence, no absence, no
+# cross-doc checks); (2) every candidate issue must quote the document
+# verbatim (code-checked) and then survive an adversarial verification vote
+# (3-vote majority on "is this a genuine flaw?") before becoming a finding.
+
+_CRITIQUE_PROMPT = """You are a focused reviewer of ONE specification document. Other checks already handle arithmetic, fabricated evidence, missing sections, and cross-document consistency — do NOT report those. You look ONLY for these flaw types within this document:
+
+All examples below are from a FICTIONAL studio-booking product — patterns, not content to look for:
+
+1. INTERNAL CONTRADICTION — the document claims X in one place and not-X in another (e.g. "all booking data stays on the studio's own server" alongside "our cloud dashboard aggregates every studio's bookings").
+2. INFEASIBLE TECHNOLOGY — a component that cannot work as described or is wildly disproportionate (e.g. "renders a full 3D walkthrough by training a neural radiance field live on the visitor's phone").
+3. ABSURD TARGET — a goal impossible at the stated resources/timeline (e.g. "capture 60% of all studios nationwide within 8 weeks purely by word of mouth").
+4. AUDIENCE MISMATCH — a design choice that contradicts the document's own stated audience (e.g. "the seniors-focused fitness app uses 8px fonts and gesture-only navigation").
+5. INFEASIBLE PLAN — team/timeline/scope combinations that cannot deliver (e.g. "a two-person team ships native iOS, Android, web, and smart-TV apps simultaneously in their first month").
+
+Rules:
+- "quote": copy the flawed sentence(s) VERBATIM from the document.
+- "issue": one sentence naming the flaw concretely.
+- "category": one of internal-contradiction | infeasible-tech | absurd-target | audience-mismatch | infeasible-plan.
+- Report REAL flaws only — do not manufacture criticism of a sound document. An empty array is a valid, common answer.
+- At most 4 issues; severity over quantity.
+
+Respond with ONLY a fenced JSON array (no commentary):
+```json
+[{"quote": "...", "issue": "...", "category": "..."}]
+```"""
+
+_CRITIQUE_VERIFY_PROMPT = """You are a referee judging one proposed review finding. You have two duties of EQUAL weight:
+- Genuine, serious flaws DO occur in documents and MUST survive your review — waving a real defect through as "defensible" is a failure.
+- Manufactured criticism MUST die — a defensible product choice, a stylistic nitpick, or a misreading dressed up as a flaw is also a failure.
+
+Document ({doc_key}):
+{doc_text}
+
+Proposed finding ({category}): {issue}
+Quoted text: "{quote}"
+
+The bar: would a competent reviewer stake their name on this finding as stated?
+
+Both sides, fictional examples:
+- Document says "all booking data stays on the studio's own server" and elsewhere "our cloud dashboard aggregates every studio's bookings" — proposed as internal-contradiction → genuine: true (the two statements cannot both hold; a competent reviewer would flag this).
+- Document says "onboarding takes about ten minutes" — proposed as internal-contradiction because another section calls the product "instant to adopt" → genuine: false (marketing phrasing vs a setup estimate is not a contradiction; this is a nitpick).
+
+Respond with ONLY a fenced JSON object:
+```json
+{{"genuine": true/false}}
+```"""
+
+CRITIQUE_CATEGORIES = (
+    "internal-contradiction", "infeasible-tech", "absurd-target",
+    "audience-mismatch", "infeasible-plan",
+)
+
+
+async def critique_audit(
+    docs: dict[str, str],
+    audit_keys: tuple[str, ...] | None = None,
+    samples: int = 3,
+    votes: int = 3,
+    judge_tier: int = 2,
+    repeats: int = 1,
+    stats: dict | None = None,
+) -> list[dict]:
+    """Run the open-critique micro-pass, optionally as a union ensemble.
+
+    judge_tier routes the verification votes separately from candidate
+    generation — measured division of labor: the fast model over-generates
+    but never misses a planted flaw among its candidates; the quality model
+    generates narrowly but is the only one whose genuineness judgment
+    discriminates (fast-model judging rubber-stamped or blanket-refuted in
+    every framing tried).
+
+    repeats runs the whole generate+judge cycle independently N times and
+    unions the findings (containment-deduped). Measured motive: single-run
+    recall oscillates 3-5/6 on dev purely from sampling (different planted
+    flaws survive each run) while the FP base holds at 0 — union raises
+    recall without a symmetric FP cost."""
+    merged: list[dict] = []
+    merged_quotes: set[str] = set()
+    agg = {"candidates": 0, "candidate_quotes": []}
+    for _ in range(max(1, repeats)):
+        rep_stats: dict = {}
+        findings = await _critique_once(docs, audit_keys, samples, votes, judge_tier, rep_stats)
+        agg["candidates"] += rep_stats.get("candidates", 0)
+        agg["candidate_quotes"].extend(rep_stats.get("candidate_quotes", []))
+        for f in findings:
+            key = _normalize_ws(f["quote"]).lower()
+            if any(key in s or s in key for s in merged_quotes):
+                continue
+            merged_quotes.add(key)
+            merged.append(f)
+    if stats is not None:
+        stats.update({**agg, "findings": len(merged), "repeats": max(1, repeats)})
+    return merged
+
+
+async def _critique_once(
+    docs: dict[str, str],
+    audit_keys: tuple[str, ...] | None,
+    samples: int,
+    votes: int,
+    judge_tier: int,
+    stats: dict | None,
+) -> list[dict]:
+    """One full generate+judge cycle of the open-critique pass."""
+    audit_keys = audit_keys or tuple(docs)
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for doc_key in audit_keys:
+        doc_text = docs.get(doc_key) or ""
+        if not doc_text.strip():
+            continue
+        for _ in range(samples):
+            try:
+                reply = await call_llm(
+                    messages=[
+                        {"role": "system", "content": _CRITIQUE_PROMPT},
+                        {"role": "user", "content": f"Document ({doc_key}):\n\n{doc_text}"},
+                    ],
+                    model_tier=2, temperature=0.7, max_tokens=1536,
+                    role="audit", think=False,
+                )
+            except Exception as e:
+                logger.warning(f"critique_audit sampling failed for {doc_key}: {e}")
+                continue
+            for item in _parse_items(reply):
+                quote, issue = item.get("quote", ""), item.get("issue", "")
+                category = item.get("category", "")
+                if not quote or not issue or category not in CRITIQUE_CATEGORIES:
+                    continue
+                if _normalize_ws(quote) not in _normalize_ws(doc_text):
+                    logger.debug(f"critique_audit: quote not in doc, rejected: {quote!r}")
+                    continue
+                key = _normalize_ws(quote).lower()
+                if any(key in s or s in key for s in seen):
+                    continue
+                seen.add(key)
+                candidates.append({"doc": doc_key, "quote": quote,
+                                   "issue": issue, "category": category})
+
+    findings: list[dict] = []
+    for cand in candidates:
+        votes_g: list[bool] = []
+        for _ in range(votes):
+            try:
+                reply = await call_llm(
+                    messages=[{
+                        "role": "user",
+                        "content": _CRITIQUE_VERIFY_PROMPT.format(
+                            doc_key=cand["doc"], doc_text=docs[cand["doc"]],
+                            category=cand["category"], issue=cand["issue"],
+                            quote=cand["quote"],
+                        ),
+                    }],
+                    model_tier=judge_tier, temperature=0.3, max_tokens=256,
+                    role="audit", think=False,
+                )
+                v = _parse_verdict_key(reply, "genuine")
+                if v is not None:
+                    votes_g.append(v)
+            except Exception as e:
+                logger.warning(f"critique_audit verify failed: {e}")
+        # 3-vote majority on a TWO-SIDED question. Measured both failure
+        # modes on dev: an approval-framed verify rubber-stamped every
+        # candidate (7+14 clean FPs); a refute-framed unanimous verify
+        # killed all six planted defects. Two-sided policy + majority is
+        # the same cure that ended the Phase 1 verifier oscillation.
+        if votes_g and sum(votes_g) * 2 > len(votes_g):
+            findings.append({"kind": cand["category"], **{k: cand[k] for k in ("doc", "quote", "issue")}})
+    if stats is not None:
+        stats.update({
+            "candidates": len(candidates),
+            "findings": len(findings),
+            "candidate_quotes": [c["quote"][:90] for c in candidates],
         })
     return findings
 
