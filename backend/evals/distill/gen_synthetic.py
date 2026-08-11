@@ -198,6 +198,14 @@ def is_complete(outdir: Path) -> bool:
     )
 
 
+def project_rng(name: str, seed: int) -> random.Random:
+    """Per-project RNG. A single run-level RNG looked fine in batch mode but
+    silently collapsed diversity once runs were restarted one project at a
+    time: every fresh process re-drew the SAME first sample, so 10 projects
+    ended up sharing 4 defect types out of 7."""
+    return random.Random(f"{seed}:{name}")
+
+
 async def build_project(name: str, idea: str, defects_per_project: int, rng: random.Random) -> None:
     outdir = DATA / "projects" / name
     if is_complete(outdir):
@@ -244,15 +252,66 @@ async def main() -> None:
     ap.add_argument("--projects", type=int, default=3, help="how many seed projects to build this run")
     ap.add_argument("--defects-per-project", type=int, default=4)
     ap.add_argument("--seed", type=int, default=41, help="rng seed (defect type/doc choices)")
+    ap.add_argument("--top-up", type=int, default=0, metavar="N",
+                    help="plant up to N missing defect types into ALREADY-complete projects "
+                         "(rebalances coverage across the taxonomy)")
     args = ap.parse_args()
 
-    rng = random.Random(args.seed)
+    if args.top_up:
+        await top_up(args.top_up, args.seed, args.projects)
+        return
+
     todo = [s for s in SEED_IDEAS if not is_complete(DATA / "projects" / s[0])]
     todo = todo[: args.projects]
     print(f"building {len(todo)} synthetic project(s): {[n for n, _ in todo]}")
     for name, idea in todo:
-        await build_project(name, idea, args.defects_per_project, rng)
+        await build_project(name, idea, args.defects_per_project, project_rng(name, args.seed))
     print("Done —", DATA / "projects")
+
+
+async def top_up(per_project: int, seed: int, max_projects: int) -> None:
+    """Plant globally-underrepresented defect types into complete projects."""
+    complete = [n for n, _ in SEED_IDEAS if is_complete(DATA / "projects" / n)]
+    have: dict[str, list[str]] = {}
+    global_counts: dict[str, int] = {t: 0 for t in DEFECT_TYPES}
+    for name in complete:
+        ds = json.loads((DATA / "projects" / name / "defects.json").read_text(encoding="utf-8"))
+        have[name] = [d["type"] for d in ds]
+        for t in have[name]:
+            global_counts[t] = global_counts.get(t, 0) + 1
+    print(f"complete projects: {len(complete)} | current type counts: {global_counts}")
+
+    touched = 0
+    for name in complete:
+        if touched >= max_projects:
+            break
+        missing = [t for t in DEFECT_TYPES if t not in have[name]]
+        if not missing:
+            continue
+        missing.sort(key=lambda t: global_counts.get(t, 0))  # rarest first
+        rng = project_rng(name, seed + 1)
+        outdir = DATA / "projects" / name
+        docs = {k: (outdir / f"{k}.md").read_text(encoding="utf-8") for k in SPEC_KEYS}
+        planted = json.loads((outdir / "defects.json").read_text(encoding="utf-8"))
+        added = 0
+        for defect_type in missing[:per_project]:
+            doc_key = rng.choice(DEFECT_TARGET_DOCS[defect_type])
+            result = await plant_defect(doc_key, docs[doc_key], defect_type)
+            if result is None:
+                print(f"  [{name}] top-up plant failed for {defect_type}")
+                continue
+            stem = f"defect_{defect_type}_{doc_key}"
+            (outdir / f"{stem}.md").write_text(result["document"], encoding="utf-8")
+            planted.append({k: result[k] for k in ("doc", "type", "planted_quote", "note")}
+                           | {"file": f"{stem}.md"})
+            (outdir / "defects.json").write_text(
+                json.dumps(planted, indent=2, ensure_ascii=False), encoding="utf-8")
+            global_counts[defect_type] = global_counts.get(defect_type, 0) + 1
+            added += 1
+        if added:
+            touched += 1
+            print(f"  [{name}] +{added} defect(s): {missing[:per_project]}")
+    print("Done — top-up")
 
 
 if __name__ == "__main__":
