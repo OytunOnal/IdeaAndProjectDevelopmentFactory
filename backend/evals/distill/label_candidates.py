@@ -65,12 +65,15 @@ TYPE_TO_CATEGORY = {
 
 TEACHER_INSTRUCTION = (
     "You are the reference judge producing training labels for a smaller "
-    "model. For EACH candidate below, judge with two duties of EQUAL "
+    "model. Each candidate below is a proposed review finding against one of "
+    "the documents in this file; the candidate's 'variant' field names the "
+    "document it belongs to. Judge EACH candidate with two duties of EQUAL "
     "weight: genuine, serious flaws MUST be labeled true; manufactured "
     "criticism (defensible choices, stylistic nitpicks, misreadings) MUST "
     "be labeled false. The bar: would a competent reviewer stake their "
     "name on this finding as stated? Output: a JSONL file next to this one "
-    "named <this-file-stem>.labels.jsonl, one line per candidate: "
+    "named <this-file-stem>.labels.jsonl, one line per candidate, no other "
+    "commentary: "
     '{"key": "<key>", "genuine": true/false, "rationale": "<one sentence>"}'
 )
 
@@ -201,20 +204,30 @@ def stage_export() -> None:
                 else:
                     pending.setdefault(row["variant"], []).append({"key": key, **row})
 
-        queued = 0
-        for variant, vrows in pending.items():
+        # One queue file per PROJECT, not per variant. Each file is processed
+        # in a single teacher session, so per-variant files (20 projects x ~10
+        # variants = ~200 sessions) would be unusable by hand; per-project is
+        # ~20 sessions of ~35 candidates each, which one response can cover.
+        if not pending:
+            print(f"  [{project}] auto-labeled {auto_n}, nothing left for the teacher")
+            continue
+        documents: dict[str, str] = {}
+        candidates: list[dict] = []
+        for variant, vrows in sorted(pending.items()):
             doc_file = f"{variant}.md" if not variant.startswith("clean_") else f"{variant.removeprefix('clean_')}.md"
-            doc_text = (DATA / "projects" / project / doc_file).read_text(encoding="utf-8")
-            qfile = queue_dir / f"{project}__{variant}.json"
-            qfile.write_text(json.dumps({
-                "instruction": TEACHER_INSTRUCTION,
-                "project": project, "variant": variant, "doc_key": vrows[0]["doc"],
-                "document": doc_text,
-                "candidates": [{"key": r["key"], "category": r["category"],
-                                "issue": r["issue"], "quote": r["quote"]} for r in vrows],
-            }, indent=2, ensure_ascii=False), encoding="utf-8")
-            queued += len(vrows)
-        print(f"  [{project}] auto-labeled {auto_n}, queued {queued} for the teacher")
+            documents[variant] = (DATA / "projects" / project / doc_file).read_text(encoding="utf-8")
+            candidates.extend({"key": r["key"], "variant": variant, "doc": r["doc"],
+                               "category": r["category"], "issue": r["issue"],
+                               "quote": r["quote"]} for r in vrows)
+        qfile = queue_dir / f"{project}.json"
+        qfile.write_text(json.dumps({
+            "instruction": TEACHER_INSTRUCTION,
+            "project": project,
+            "documents": documents,
+            "candidates": candidates,
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"  [{project}] auto-labeled {auto_n}, queued {len(candidates)} "
+              f"across {len(documents)} document(s) -> {qfile.name}")
 
 
 # ── stage: import (merge teacher labels) ───────────────────────────────────
