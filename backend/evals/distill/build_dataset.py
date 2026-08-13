@@ -35,7 +35,7 @@ def _sanitize_rationale(row: dict) -> str:
     """Code-label rationales reference the corpus construction ("planted",
     "auto") — the student must never learn that vocabulary. Rebuild them
     from the candidate's own issue text."""
-    if row["label_source"] == "code":
+    if row["label_source"] == "code" and row.get("rationale_source") != "teacher-opus":
         issue = re.split(r"(?<=[.!?])\s", row["issue"].strip())[0]
         issue = re.sub(r"(?i)planted\s+", "", issue).rstrip(".")
         return f"The quoted text is a real defect in the document: {issue}."
