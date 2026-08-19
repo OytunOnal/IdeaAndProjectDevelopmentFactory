@@ -146,16 +146,17 @@ changed, cured the collapse:
 | tuned run #1 (template rationales) | 0.22 | 0.97 |
 | tuned run #2 (clean rationales) | 0.62 | 0.33 |
 | qwen3.6:35b (the production judge), zero-shot | 0.82 | 0.30 |
-| qwen3.8:27b, zero-shot | 1.00 | 0.58* |
+| qwen3.8:27b, zero-shot | 1.00 | 0.57 |
 
 The same ladder measured the production judge on this distribution for the
 first time: it misses 70% of genuine findings and catches zero
 audience-mismatch defects, which quantifies why this pass is a distillation
 target at all. It also caught a fresh contender: qwen3.8:27b (released
 mid-August 2026) beats every row zero-shot, at zero false positives.
-<sub>*29 of its 174 replies were cut by the generation cap before the JSON
-verdict; a higher-cap rerun is pending, and the routing decision (27B as
-the critique judge, gated on the real pipeline's dev set) waits for it.</sub>
+<sub>A higher-cap rerun ruled out a truncation artifact in the first
+27B measurement (verdict unchanged, zero false positives in both runs).
+The routing decision, 27B as the critique judge, is gated on the real
+pipeline's dev set next.</sub>
 
 Community bases marketed for exactly this job were raced too: a dedicated
 judge model (Selene-1-Mini) and a reasoning-RL model (Tulu 3.1) both

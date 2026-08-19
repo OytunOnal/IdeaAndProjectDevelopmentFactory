@@ -352,11 +352,13 @@ this distribution, plus qwen3.8:27b (released 2026-08-14), both via
 |---|---|---|---|
 | tuned-8B run #2 | 0.62 | 0.33 | ~5GB |
 | qwen3.6:35b (production judge) | 0.82 | 0.30 | 23GB; audience-mismatch 0.00/0.00 |
-| qwen3.8:27b zero-shot | 1.00 | 0.58* | 18GB, ~4.4s/row vs 35B 7.5s |
+| qwen3.8:27b zero-shot | 1.00 | 0.57 | 18GB, ~4.4s/row vs 35B 7.5s |
 
-*27B caveat: 29/174 replies truncated by the 220-token cap before the
-JSON verdict (25 of them gold=False, cut mid-refutation, likely TNs);
-worst-case R=0.50. A num_predict=512 rerun is in progress — pending.
+27B truncation check: the first run's 220-token cap cut 29/174 replies
+before the JSON verdict; a num_predict=512 rerun dropped unparsed to 7
+and left the verdict unchanged (tp=16 fp=0 fn=12 tn=139; R=0.57 over
+parsed rows, 0.53 worst-case counting the 2 unparsed genuines as
+misses). Zero false positives across all 174 rows in both runs.
 
 Readings: (1) the production 35B judge is weak on this distribution —
 misses 70% of genuines and catches ZERO audience-mismatch; Phase 4's
@@ -366,8 +368,7 @@ is weak across ALL models (27B R0.27, tuned R0.07, 35B R0.33) — the
 largest class (77 rows); label quality there intersects the known
 35B-generator cross-line reconciliation errors and deserves an audit.
 
-Open decisions (pending the 27B np512 rerun): route critique's judge to
-27B (gate: `micro_runner --pass critique` on dev, the real pipeline);
-tuned-8B GGUF export parked unless 27B loses on dev; base change for a
-possible run #3 is now a 27B-vs-8B-class question, per the
-BASE_CANDIDATES protocol.
+Open decisions: route critique's judge to 27B (gate:
+`micro_runner --pass critique` on dev, the real pipeline); tuned-8B GGUF
+export parked unless 27B loses on dev; base change for a possible run #3
+is now a 27B-vs-8B-class question, per the BASE_CANDIDATES protocol.
