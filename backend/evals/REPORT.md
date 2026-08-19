@@ -396,9 +396,27 @@ candidates passing) was the known 8B judge indiscrimination, consistent
 with Phase 3. Lesson repeated: pin EVERY tier explicitly when the
 harness has per-stage env defaults.
 
-Open decisions: routing the production critique to 27B needs a config
-split first (ollama_model_quality currently feeds both the critique
-judge AND the five Phase-2-validated spec generators; switching the
-shared knob would silently change the generators too). Tuned-8B GGUF
-export parked; base change for a possible run #3 is a 27B-vs-8B-class
-question per the BASE_CANDIDATES protocol.
+Production routing: DONE. `OLLAMA_MODEL_CRITIQUE` splits the critique
+pass (gen + judge) from the shared quality-model knob so the five
+Phase-2-validated spec generators are untouched; the dev .env now pins
+the critique to qwen3.8:27b.
+
+## 27B as spec generator: blocked by hardware, not measured on merit
+
+The gen_runner eval (dev, think-on, both tiers pinned to 27B) produced
+FOUR 900-second timeouts with zero output — no document completed.
+Root cause, verified: qwen3.8-27b is a DENSE 27.3B (`ollama show`:
+arch qwen35), while qwen3.6:35b is MoE (arch qwen35moe, small active
+set — why it manages ~210s/doc on CPU). On this machine (RTX 3060
+Laptop, 6GB VRAM) the dense 19GB model runs 87%/13% CPU/GPU at 16k
+context; a trivial 200-token call took 47s, so an 8k-token spec
+document is arithmetic-infeasible inside any sane timeout. Verdict:
+generator roles stay on the 35B; the 27B-as-generator question is OPEN
+pending better hardware, not answered. (The critique role is unaffected:
+short generations, measured 4-22 min per full review, dev gate passed.)
+Infra lesson: model quality rankings do not transfer across roles when
+the roles have different output-length profiles and the hardware is
+CPU-bound — architecture (MoE vs dense) can dominate parameter count.
+
+Tuned-8B GGUF export parked; base change for a possible run #3 is a
+27B-vs-8B-class question per the BASE_CANDIDATES protocol.
