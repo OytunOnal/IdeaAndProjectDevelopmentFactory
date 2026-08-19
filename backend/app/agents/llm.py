@@ -155,6 +155,7 @@ async def call_llm(
     max_tokens: int = 4096,
     role: str | None = None,
     think: bool | None = None,
+    ollama_model: str | None = None,
 ) -> str:
     """Make a non-streaming LLM call with automatic fallback.
 
@@ -162,6 +163,8 @@ async def call_llm(
     falls back to the next available provider. `role` engages the per-role
     routing map (see LOCAL_MIGRATION_PLAN.md). `think` explicitly overrides
     thinking for this call (precedence: param > role map > env > tier).
+    `ollama_model` pins a specific local model for this call when the provider
+    resolves to ollama; other providers ignore it.
     """
     if think is None:
         think = _role_think_for(role)
@@ -171,7 +174,7 @@ async def call_llm(
     if api_key and api_key.strip():
         provider, key = _resolve_provider(api_key)
         try:
-            return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think, ollama_tier)
+            return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think, ollama_tier, ollama_model)
         except Exception as e:
             logger.warning(f"Provider {provider} (user key) failed: {e}. Trying fallbacks...")
 
@@ -180,7 +183,7 @@ async def call_llm(
     for provider, key in _role_providers_for(role):
         for attempt in range(2):  # retry once on 429
             try:
-                return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think, ollama_tier)
+                return await _call_single(messages, provider, key, model_tier, temperature, max_tokens, think, ollama_tier, ollama_model)
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str and attempt == 0:
@@ -233,11 +236,13 @@ async def stream_llm(
 async def _call_single(
     messages: list[dict], provider: str, key: str, model_tier: int,
     temperature: float, max_tokens: int, think: bool | None = None,
-    ollama_tier: int | None = None,
+    ollama_tier: int | None = None, ollama_model: str | None = None,
 ) -> str:
     if provider == "ollama" and ollama_tier is not None:
         model_tier = ollama_tier  # role map pins the ollama model (":quality"/":fast")
     model = PROVIDERS[provider][f"tier{model_tier}"]
+    if provider == "ollama" and ollama_model:
+        model = ollama_model  # per-call pin (e.g. the critique-pass override)
     if provider == "anthropic":
         return await _call_anthropic(messages, model, key, temperature, max_tokens)
     if provider == "ollama":

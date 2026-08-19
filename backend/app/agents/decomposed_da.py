@@ -18,6 +18,7 @@ import operator
 import re
 
 from app.agents.llm import call_llm
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -1050,6 +1051,7 @@ async def _critique_once(
                     ],
                     model_tier=gen_tier, temperature=0.7, max_tokens=1536,
                     role="audit", think=False,
+                    ollama_model=settings.ollama_model_critique or None,
                 )
             except Exception as e:
                 logger.warning(f"critique_audit sampling failed for {doc_key}: {e}")
@@ -1085,6 +1087,7 @@ async def _critique_once(
                     }],
                     model_tier=judge_tier, temperature=0.3, max_tokens=256,
                     role="audit", think=False,
+                    ollama_model=settings.ollama_model_critique or None,
                 )
                 v = _parse_verdict_key(reply, "genuine")
                 if v is not None:

@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model_quality: str = "qwen3.6:35b"  # tier1 (spec/judge-grade roles)
     ollama_model_fast: str = "qwen3:8b"        # tier2/tier3 (fast roles)
+    # Open-critique pass override (gen + genuineness judge). Empty = tier
+    # default. Split from ollama_model_quality so the critique judge can move
+    # to a different model without silently changing the five spec generators
+    # (which were validated separately — REPORT.md Phase 2 vs Phase 4).
+    ollama_model_critique: str = ""
     # Force ALL llm calls through one provider (e.g. "ollama") — used by eval
     # runs for deterministic, rate-limit-free measurement. Empty = normal order.
     llm_force_provider: str = ""
