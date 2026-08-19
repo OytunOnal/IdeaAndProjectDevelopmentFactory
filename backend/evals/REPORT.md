@@ -368,7 +368,37 @@ is weak across ALL models (27B R0.27, tuned R0.07, 35B R0.33) — the
 largest class (77 rows); label quality there intersects the known
 35B-generator cross-line reconciliation errors and deserves an audit.
 
-Open decisions: route critique's judge to 27B (gate:
-`micro_runner --pass critique` on dev, the real pipeline); tuned-8B GGUF
-export parked unless 27B loses on dev; base change for a possible run #3
-is now a 27B-vs-8B-class question, per the BASE_CANDIDATES protocol.
+## 27B in the real pipeline: dev critique gate PASSED
+
+`micro_runner --pass critique` on dev, production config (gen+judge on
+the candidate, samples=3, repeats=2), label `qwen3.8-27b-ens2`, vs the
+frozen 35B config (`qwen3.6-35b-ens2`):
+
+| run | 35B-ens2 | 27B-ens2 |
+|---|---|---|
+| invoicefox defected | 3 findings | 6 findings, in-scope 3/3 |
+| invoicefox clean | 0 FP | 0 FP (14→6 judge filtering) |
+| fleetsense defected | 7 findings | 4 findings, in-scope 3/3 |
+| fleetsense clean | 1 FP | 0 FP |
+
+27B catches all 6 in-scope critique defects with ZERO clean-bundle FPs
+(35B: 1). Its extra defected-bundle findings are not noise: e.g. it
+flagged fleetsense's churn math (10% monthly churn stated as ~33-month
+average lifetime), a real pre-existing flaw the 35B never surfaced.
+Cost: slower wall-clock (defected combos 17-22 min vs 35B's shorter
+runs; clean combos 4-7 min).
+
+Measurement integrity note: the first four "27B" runs were invalid and
+deleted — micro_runner's critique defaults (`CRITIQUE_JUDGE_TIER=2`,
+gen_tier=2) silently routed both roles to the FAST model, so the runs
+measured 8B gen+judge under a 27B label. The flood they showed (17→15
+candidates passing) was the known 8B judge indiscrimination, consistent
+with Phase 3. Lesson repeated: pin EVERY tier explicitly when the
+harness has per-stage env defaults.
+
+Open decisions: routing the production critique to 27B needs a config
+split first (ollama_model_quality currently feeds both the critique
+judge AND the five Phase-2-validated spec generators; switching the
+shared knob would silently change the generators too). Tuned-8B GGUF
+export parked; base change for a possible run #3 is a 27B-vs-8B-class
+question per the BASE_CANDIDATES protocol.
