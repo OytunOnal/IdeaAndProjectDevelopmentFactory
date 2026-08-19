@@ -121,11 +121,55 @@ monolithic baseline, on a fully local runtime. The false-positive gaps the
 held-out run exposed are locked as deterministic unit tests, and the
 monolithic path remains the automatic fallback.
 
+### Distilling the review judge (Phase 4, in progress)
+
+The open-critique genuineness judge is the last quality role still on the
+35B, so it became the first distillation target. The data layer is fully
+synthetic and self-labeled: 19 generated projects with seeded defects,
+774 candidate findings labeled genuine/not (95 by code from seeded-quote
+overlap, 679 by a frontier teacher over chat at zero API cost, gated by an
+independent meta-eval that re-judges a random sample), 600 train / 174 eval
+rows with a project-disjoint split and the production judge prompt verbatim.
+
+The first QLoRA run produced a failure worth publishing. Precision did not
+move and recall hit 0.97: the tuned model said "genuine" to nearly
+everything. Root cause: the 95 code-labeled examples shared one rationale
+template, and in rationale-first output format that opening phrase became a
+proxy for the label. The lesson generalizes: **every part of a training
+example is signal, including writing style**, and style must stay
+independent of the label. Rewriting those 95 rationales, with nothing else
+changed, cured the collapse:
+
+| Config (sealed 174-row eval, 30 genuine) | P | R |
+|---|---|---|
+| Qwen3-8B base, zero-shot | 0.24 | 0.67 |
+| tuned run #1 (template rationales) | 0.22 | 0.97 |
+| tuned run #2 (clean rationales) | 0.62 | 0.33 |
+| qwen3.6:35b (the production judge), zero-shot | 0.82 | 0.30 |
+| qwen3.8:27b, zero-shot | 1.00 | 0.58* |
+
+The same ladder measured the production judge on this distribution for the
+first time: it misses 70% of genuine findings and catches zero
+audience-mismatch defects, which quantifies why this pass is a distillation
+target at all. It also caught a fresh contender: qwen3.8:27b (released
+mid-August 2026) beats every row zero-shot, at zero false positives.
+<sub>*29 of its 174 replies were cut by the generation cap before the JSON
+verdict; a higher-cap rerun is pending, and the routing decision (27B as
+the critique judge, gated on the real pipeline's dev set) waits for it.</sub>
+
+Community bases marketed for exactly this job were raced too: a dedicated
+judge model (Selene-1-Mini) and a reasoning-RL model (Tulu 3.1) both
+collapsed into yes-machines on this distribution; neither beat the plain
+Qwen3-8B base. Off-the-shelf "judge-tuned" does not transfer here, which is
+the distribution-mismatch argument for training on your own data, measured.
+
 The full trail: [`EVAL_PLAN.md`](EVAL_PLAN.md) (design for all 29 nodes) ·
 [`backend/evals/REPORT.md`](backend/evals/REPORT.md) (role × model matrix and
 round history) · [`backend/evals/JUDGE_SCORES.md`](backend/evals/JUDGE_SCORES.md)
 (per-defect judging) · [`LOCAL_MIGRATION_PLAN.md`](LOCAL_MIGRATION_PLAN.md)
-(principles, phases, and the keyword-vs-semantic architecture decision).
+(principles, phases, and the keyword-vs-semantic architecture decision) ·
+[`backend/evals/distill/BASE_CANDIDATES.md`](backend/evals/distill/BASE_CANDIDATES.md)
+(the base-model shootout and selection protocol).
 
 ## AI engineering under the hood
 

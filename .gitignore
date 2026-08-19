@@ -55,3 +55,6 @@ htmlcov/
 .vscode/
 
 backend/evals/results/
+
+# machine-local TLS bundle (Avast interception workaround)
+backend/ca-bundle-avast.pem

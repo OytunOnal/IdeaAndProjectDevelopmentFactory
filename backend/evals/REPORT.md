@@ -284,3 +284,90 @@ Verdict: the decomposition thesis holds — catch capability generalizes;
 FP hardening continues on dev (this held-out set is retired for the
 precision-affected classes per HELDOUT.md). Durable fixes for parked
 classes and judge variance are Phase 4 distillation targets.
+
+# Phase 4 — Judge distillation (critique genuineness judge)
+
+Goal: train the critique pass's genuineness judge ("is this candidate
+finding a real defect?") into Qwen3-8B so the pass can drop from the 35B.
+Data: 19-project synthetic corpus (self-labeled seeded defects), 774
+candidates labeled 126 genuine / 648 not (95 by code via seeded-quote
+overlap, 679 by teacher Opus over chat; meta-eval passed 10/10 reject +
+8/8 accept). SFT set: 600 train / 174 eval, project-disjoint split
+(eval: mendhub/plantpulse/recitehall/tastetrail), production judge prompt
+verbatim, rationale-first JSON. All numbers below are on the sealed
+174-row eval (30 genuine).
+
+## Run #1 failure: yes-sayer collapse from rationale STYLE
+
+| config | P | R | note |
+|---|---|---|---|
+| base Qwen3-8B (Colab, untuned) | 0.24 | 0.67 | half yes-machine baseline |
+| tuned run #1 | 0.22 | 0.97 | ~132 positives of 174 |
+
+Root cause (verified: 19/30 sampled answers opened with the template):
+all 95 code-labeled genuines shared ONE rationale template ("The quoted
+text is a real defect..."), so rationale style became a proxy for the
+label — in rationale-first format the opening phrase locks the verdict
+to true. META-LESSON: every part of a training example is signal,
+including style; style must be i.i.d. with respect to the label.
+
+Fix (single-variable): the 95 rationales rewritten by the teacher
+(decontaminated export→import, `fix_rationales.py`); new set has the
+template 0 times, 90 distinct openings across 96 train genuines;
+split/counts byte-identical otherwise.
+
+## Base-candidate shootout (zero-shot, Ollama, same eval)
+
+Community bases with post-training claims, tested before retraining:
+hermes3:8b P0.15/R0.13 (reject-machine), selene-mini:8b (a dedicated
+judge model!) P0.17/R0.90 and tulu3:8b (reasoning-RL) P0.18/R0.97 (both
+yes-machines). None beat base Qwen3-8B → base stays; "even judge-tuned
+models collapse on our distribution" = the distribution-mismatch thesis,
+now measured. Details in `distill/BASE_CANDIDATES.md`.
+
+## Run #2 (clean rationales): collapse cured, 35B profile reached
+
+| category | P | R | n |
+|---|---|---|---|
+| TOTAL | 0.62 | 0.33 | 174 |
+| absurd-target | 1.00 | 0.75 | 7 |
+| audience-mismatch | 0.33 | 0.33 | 22 |
+| infeasible-plan | 1.00 | 0.60 | 41 |
+| infeasible-tech | 0.50 | 0.67 | 27 |
+| internal-contradiction | 0.33 | 0.07 | 77 |
+
+Same data counts, only rationale style changed: P 0.22→0.62, R 0.97→0.33.
+The template diagnosis is confirmed by measurement. absurd-target (a
+named distillation target) went from hardest-for-extractor to 1.00/0.75.
+The tuned 8B now sits at the production 35B judge's profile (below) —
+matching recall, lower precision — but does not beat it.
+
+## Zero-shot ladder: the production judge measured, and a new contender
+
+First-ever measurement of the production critique judge (qwen3.6:35b) on
+this distribution, plus qwen3.8:27b (released 2026-08-14), both via
+`zero_shot_eval.py` (think off, temp 0):
+
+| model | P | R | note |
+|---|---|---|---|
+| tuned-8B run #2 | 0.62 | 0.33 | ~5GB |
+| qwen3.6:35b (production judge) | 0.82 | 0.30 | 23GB; audience-mismatch 0.00/0.00 |
+| qwen3.8:27b zero-shot | 1.00 | 0.58* | 18GB, ~4.4s/row vs 35B 7.5s |
+
+*27B caveat: 29/174 replies truncated by the 220-token cap before the
+JSON verdict (25 of them gold=False, cut mid-refutation, likely TNs);
+worst-case R=0.50. A num_predict=512 rerun is in progress — pending.
+
+Readings: (1) the production 35B judge is weak on this distribution —
+misses 70% of genuines and catches ZERO audience-mismatch; Phase 4's
+premise is now quantified. (2) 27B zero-shot dominates both the 35B and
+the tuned student on every axis, at zero FP. (3) internal-contradiction
+is weak across ALL models (27B R0.27, tuned R0.07, 35B R0.33) — the
+largest class (77 rows); label quality there intersects the known
+35B-generator cross-line reconciliation errors and deserves an audit.
+
+Open decisions (pending the 27B np512 rerun): route critique's judge to
+27B (gate: `micro_runner --pass critique` on dev, the real pipeline);
+tuned-8B GGUF export parked unless 27B loses on dev; base change for a
+possible run #3 is now a 27B-vs-8B-class question, per the
+BASE_CANDIDATES protocol.
